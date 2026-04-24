@@ -14,8 +14,13 @@ load_dotenv(override=True)
 
 # API Key & Supabase Logic (Prioritize st.secrets for Cloud deployment)
 def get_secret(key, default=None):
-    if key in st.secrets:
-        return st.secrets[key]
+    try:
+        # Check if secrets exist and the key is present
+        if key in st.secrets:
+            return st.secrets[key]
+    except:
+        # Fallback if st.secrets is not initialized or accessible (common in local dev)
+        pass
     return os.getenv(key, default)
 
 api_key = get_secret("GEMINI_API_KEY")
@@ -195,7 +200,14 @@ st.markdown("""
     @media (max-width: 768px) {
         .floral-decoration {
             width: 250px;
-            opacity: 0.2;
+            opacity: 0.1;
+        }
+        .magazine-title {
+            font-size: 2.2rem;
+        }
+        .magazine-subtitle {
+            letter-spacing: 2px;
+            font-size: 0.6rem;
         }
     }
 
@@ -663,10 +675,8 @@ if st.session_state.last_result:
                 section  = "MAN" if user_gender in ["Male", "男性"] else "WOMAN"
                 zara_url = f"https://www.zara.com/tw/zt/search?searchTerm={search_query}&section={section}"
                 
-                # Tracking button
-                if st.button(t["buy"], key=f"btn_{idx}"):
-                    log_event("discover_click", name_brand)
-                    webbrowser.open_new_tab(zara_url)
+                # Cloud-compatible Discover Link
+                st.link_button(t["buy"], zara_url)
 
         if idx < len(zara_items) - 1:
             st.divider()
