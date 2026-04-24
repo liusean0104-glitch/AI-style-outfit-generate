@@ -164,6 +164,17 @@ st.markdown("""
         0% { left: -100%; }
         100% { left: 100%; }
     }
+    
+    /* Hide number input spinners */
+    input::-webkit-outer-spin-button,
+    input::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+    }
+    input[type=number] {
+        -moz-appearance: textfield;
+    }
+
     .loading-tip {
         font-family: 'Inter', sans-serif;
         font-size: 0.75rem;
@@ -199,8 +210,7 @@ st.markdown("""
 
     @media (max-width: 768px) {
         .floral-decoration {
-            width: 250px;
-            opacity: 0.1;
+            display: none !important;
         }
         .magazine-title {
             font-size: 2.2rem;
@@ -390,56 +400,61 @@ def get_base64_image(path):
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
 
-# 3. 介面語系字典
-lang_select = st.selectbox("Language / 語言", ["繁體中文", "English"])
-if lang_select == "繁體中文":
-    t = {
-        "title": "VOGUE AI STYLIST", 
-        "subtitle": "INTELLIGENT FASHION CURATION",
-        "btn": "Generate Collection", 
-        "buy": "Discover", 
-        "occ": "Occasion", 
-        "wea": "Weather",
-        "gender": "Gender",
-        "height": "Height",
-        "weight": "Weight",
-        "season": "Season",
-        "style": "Style Aesthetic",
-        "genders": ["Male", "Female", "Other"],
-        "seasons": ["Spring", "Summer", "Autumn", "Winter"],
-        "occs": ["Casual", "Business", "Date", "Gala"],
-        "weas": ["Hot", "Comfortable", "Rainy", "Cold"],
-        "styles": ["Old Money", "City Boy", "Minimalist", "Streetwear", "Korean Style", "Y2K", "Workwear", "Japanese Casual", "Athleisure", "Vintage", "High Fashion", "Goth/Dark", "Padres City Connect Jersey", "Padres Home Jersey"],
-        "upload_label": "Upload Your Outfit (Optional)",
-        "upload_help": "We'll analyze your style and physique.",
-        "analysis_title": "AI OUTFIT ANALYSIS"
-    }
-else:
-    t = {
-        "title": "VOGUE AI STYLIST", 
-        "subtitle": "INTELLIGENT FASHION CURATION",
-        "btn": "Generate Collection", 
-        "buy": "Discover", 
-        "occ": "Occasion", 
-        "wea": "Weather",
-        "gender": "Gender",
-        "height": "Height",
-        "weight": "Weight",
-        "season": "Season",
-        "style": "Style Aesthetic",
-        "genders": ["Male", "Female", "Other"],
-        "seasons": ["Spring", "Summer", "Autumn", "Winter"],
-        "occs": ["Casual", "Business", "Date", "Gala"],
-        "weas": ["Hot", "Comfortable", "Rainy", "Cold"],
-        "styles": ["Old Money", "City Boy", "Minimalist", "Streetwear", "Korean Style", "Y2K", "Workwear", "Japanese Casual", "Athleisure", "Vintage", "High Fashion", "Goth/Dark", "Padres City Connect Jersey", "Padres Home Jersey"],
-        "upload_label": "Upload Your Outfit (Optional)",
-        "upload_help": "We'll analyze your style and physique.",
-        "analysis_title": "AI OUTFIT ANALYSIS"
-    }
-
-# Fashion Magazine Header
 st.markdown(f'<div class="magazine-title">{t["title"]}</div>', unsafe_allow_html=True)
 st.markdown(f'<div class="magazine-subtitle">{t["subtitle"]}</div>', unsafe_allow_html=True)
+
+# ─── Language & Gender Row ───
+col_lang, col_gen = st.columns(2)
+with col_lang:
+    lang_select = st.selectbox("Language / 語言", ["繁體中文", "English"], label_visibility="collapsed")
+    # Update dictionary based on selection
+    if lang_select == "繁體中文":
+        t = {
+            "title": "VOGUE AI STYLIST", 
+            "subtitle": "INTELLIGENT FASHION CURATION",
+            "btn": "Generate Collection", 
+            "buy": "Discover", 
+            "occ": "Occasion", 
+            "wea": "Weather",
+            "gender": "Gender",
+            "height": "Height",
+            "weight": "Weight",
+            "season": "Season",
+            "style": "Style Aesthetic",
+            "genders": ["Male", "Female", "Other"],
+            "seasons": ["Spring", "Summer", "Autumn", "Winter"],
+            "occs": ["Casual", "Business", "Date", "Gala"],
+            "weas": ["Hot", "Comfortable", "Rainy", "Cold"],
+            "styles": ["Old Money", "City Boy", "Minimalist", "Streetwear", "Korean Style", "Y2K", "Workwear", "Japanese Casual", "Athleisure", "Vintage", "High Fashion", "Goth/Dark", "Padres City Connect Jersey", "Padres Home Jersey"],
+            "upload_label": "Upload Your Outfit (Optional)",
+            "upload_help": "We'll analyze your style and physique.",
+            "analysis_title": "AI OUTFIT ANALYSIS"
+        }
+    else:
+        t = {
+            "title": "VOGUE AI STYLIST", 
+            "subtitle": "INTELLIGENT FASHION CURATION",
+            "btn": "Generate Collection", 
+            "buy": "Discover", 
+            "occ": "Occasion", 
+            "wea": "Weather",
+            "gender": "Gender",
+            "height": "Height",
+            "weight": "Weight",
+            "season": "Season",
+            "style": "Style Aesthetic",
+            "genders": ["Male", "Female", "Other"],
+            "seasons": ["Spring", "Summer", "Autumn", "Winter"],
+            "occs": ["Casual", "Business", "Date", "Gala"],
+            "weas": ["Hot", "Comfortable", "Rainy", "Cold"],
+            "styles": ["Old Money", "City Boy", "Minimalist", "Streetwear", "Korean Style", "Y2K", "Workwear", "Japanese Casual", "Athleisure", "Vintage", "High Fashion", "Goth/Dark", "Padres City Connect Jersey", "Padres Home Jersey"],
+            "upload_label": "Upload Your Outfit (Optional)",
+            "upload_help": "We'll analyze your style and physique.",
+            "analysis_title": "AI OUTFIT ANALYSIS"
+        }
+
+with col_gen:
+    user_gender = st.selectbox(t["gender"], t["genders"], label_visibility="collapsed")
 
 # ─── Decorative Floral Injection ───
 floral_b64 = get_base64_image("floral_roses.png")
@@ -449,24 +464,24 @@ if floral_b64:
         <img src="data:image/png;base64,{floral_b64}" class="floral-decoration floral-br">
     """, unsafe_allow_html=True)
 
-# 4. UI 排版
-col_p1, col_p2, col_p3 = st.columns(3)
-with col_p1:
-    user_gender = st.selectbox(t["gender"], t["genders"])
-with col_p2:
-    user_height = st.number_input(t["height"], min_value=100, max_value=250, value=175)
-with col_p3:
-    user_weight = st.number_input(t["weight"], min_value=30, max_value=200, value=70)
+# ─── Height & Weight Row ───
+col_h, col_w = st.columns(2)
+with col_h:
+    user_height = st.number_input(t["height"], min_value=100, max_value=250, value=175, step=1)
+with col_w:
+    user_weight = st.number_input(t["weight"], min_value=30, max_value=200, value=70, step=1)
 
-col_c1, col_c2, col_c3 = st.columns(3)
-with col_c1:
+# ─── Season, Occasion, Weather Row ───
+col_s, col_o, col_w_env = st.columns(3)
+with col_s:
     user_season = st.selectbox(t["season"], t["seasons"])
-with col_c2:
+with col_o:
     user_occ = st.selectbox(t["occ"], t["occs"])
-with col_c3:
+with col_w_env:
     user_wea = st.selectbox(t["wea"], t["weas"])
 
-user_sty = st.multiselect(t["style"], t["styles"], default=[t["styles"][0]])
+# Style Aesthetic (No default, fixed list)
+user_sty = st.multiselect(t["style"], t["styles"], default=[])
 
 # ─── Outfit Upload ───
 uploaded_file = st.file_uploader(t["upload_label"], type=["jpg", "png", "jpeg"], help=t["upload_help"])
