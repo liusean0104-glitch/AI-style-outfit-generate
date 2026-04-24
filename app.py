@@ -400,16 +400,9 @@ def get_base64_image(path):
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
 
-# Default dictionary to prevent NameError
-t = {
-    "title": "VOGUE AI STYLIST", 
-    "subtitle": "INTELLIGENT FASHION CURATION",
-    "gender": "Gender",
-    "genders": ["Male", "Female", "Other"]
-}
-
-st.markdown(f'<div class="magazine-title">{t["title"]}</div>', unsafe_allow_html=True)
-st.markdown(f'<div class="magazine-subtitle">{t["subtitle"]}</div>', unsafe_allow_html=True)
+# Static Header (Same for both languages)
+st.markdown('<div class="magazine-title">VOGUE AI STYLIST</div>', unsafe_allow_html=True)
+st.markdown('<div class="magazine-subtitle">INTELLIGENT FASHION CURATION</div>', unsafe_allow_html=True)
 
 # ─── Language & Gender Row ───
 col_lang, col_gen = st.columns(2)
