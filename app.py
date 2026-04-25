@@ -7,6 +7,8 @@ import json
 import urllib.parse
 import random
 import requests
+import asyncio
+import time
 from duckduckgo_search import DDGS
 
 # 1. 載入與設定
@@ -577,53 +579,101 @@ if st.button(t["btn"]):
         st.session_state.last_result = result
         log_event("generate")
 
-# ─── Image Engine: Static Custom URLs ──────────────────────────────────────
-URL_FALLBACK_TOPS    = "https://i.postimg.cc/7Z4QNfN7/shirts.jpg"
-URL_FALLBACK_PANTS   = "https://i.postimg.cc/j233g442/pants.jpg"
-URL_FALLBACK_OTHERS  = "https://i.postimg.cc/13K77sWH/loafers.jpg"
+# ─── Image Engine ──────────────────────────────────────────────────────────
+URL_FALLBACK_TOPS   = "https://i.postimg.cc/7Z4QNfN7/shirts.jpg"
+URL_FALLBACK_PANTS  = "https://i.postimg.cc/j233g442/pants.jpg"
+URL_FALLBACK_OTHERS = "https://i.postimg.cc/13K77sWH/loafers.jpg"
 
 SPECIFIC_ITEM_IMAGES = {
-    "strappy heeled sandals": "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
-    "wide leg cargo pant": "https://i.postimg.cc/bNJTFh23/wide-leg-cargo-pant.jpg",
+    "strappy heeled sandals":    "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
+    "wide leg cargo pant":       "https://i.postimg.cc/bNJTFh23/wide-leg-cargo-pant.jpg",
     "cropped linen blend shirt": "https://i.postimg.cc/Qxtbn3WS/women-Cropped-Linen-Blend-Shirt.jpg",
-    "sleeveless satin blouse": "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
-    "linen blend trousers": "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
-    "padres city connect jersey": "https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
-    "padres home jersey": "https://i.postimg.cc/4xBkzZVC/home-jersey.avif"
+    "sleeveless satin blouse":   "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
+    "linen blend trousers":      "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
+    "padres city connect jersey":"https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
+    "padres home jersey":        "https://i.postimg.cc/4xBkzZVC/home-jersey.avif"
 }
 
+VALID_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".avif")
+
+def _is_plausible_image_url(url: str) -> bool:
+    """不做網路請求，純靠 URL 格式快速過濾明顯壞連結。"""
+    if not url or not url.startswith("http"):
+        return False
+    url_lower = url.lower().split("?")[0]  # 去掉 query string 再判斷副檔名
+    return any(url_lower.endswith(ext) for ext in VALID_EXTENSIONS)
+
+def _ddg_search_one(query: str, max_results: int = 3) -> str | None:
+    """單一 query 的 DDG 搜尋，回傳第一個格式合理的圖片 URL。"""
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.images(
+                keywords=query,
+                region="wt-wt",
+                safesearch="moderate",
+                max_results=max_results
+            ))
+        for r in results:
+            url = r.get("image", "")
+            if _is_plausible_image_url(url):
+                return url
+    except Exception:
+        pass
+    return None
+
+async def _race_queries(queries: list[str]) -> str | None:
+    """
+    並行跑所有 query，回傳最先成功的結果。
+    用 asyncio + executor 包住同步的 DDGS，避免 blocking event loop。
+    """
+    loop = asyncio.get_event_loop()
+
+    tasks = [
+        loop.run_in_executor(None, _ddg_search_one, q)
+        for q in queries
+    ]
+
+    for coro in asyncio.as_completed(tasks):
+        result = await coro
+        if result:
+            # 找到就取消其餘 task，不再等待
+            for t in tasks:
+                t.cancel()
+            return result
+
+    return None
+
 def get_zara_image(item_name: str, gender: str, category: str = "others") -> str:
-    """Try to fetch a real ZARA image via DuckDuckGo, else use the static fallback."""
-    n = item_name.lower()
+    n = item_name.lower().strip()
     g = "man" if gender in ["Male", "男性"] else "woman"
-    
-    # 1. Check for specific item matches in the manual list first
+
+    # ── 1. 精確比對 ──────────────────────────────────────────────────────────
     for key, url in SPECIFIC_ITEM_IMAGES.items():
         if key in n:
             return url
 
-    # 2. Try to "crawl" using DuckDuckGo
+    # ── 2. 並行搜尋（誰快用誰）──────────────────────────────────────────────
+    queries = [
+        f"zara {g} {item_name} outfit",        # 有品牌感，圖品質較好
+        f"{g} {item_name} fashion product",    # 無品牌，命中率更高
+        f"{item_name} clothing lookbook",      # 最寬鬆保底
+    ]
+
     try:
-        # Search specifically for images from zara.com related to the item
-        with DDGS() as ddgs:
-            # We add "site:zara.com" to ensure we get official product shots
-            search_query = f"site:zara.com {g} {item_name} product shot"
-            results = ddgs.images(
-                keywords=search_query,
-                region="wt-wt",
-                safesearch="off",
-                max_results=3
-            )
-            if results:
-                # Return the first valid image URL found
-                return results[0]['image']
-    except Exception as e:
-        # If rate-limited or error, just fall through to the static fallback
+        result = asyncio.run(_race_queries(queries))
+        if result:
+            return result
+    except Exception:
         pass
 
-    # 3. Generic category fallbacks (Original logic)
-    if "shirt" in n or "襯衫" in n or category == "top": return URL_FALLBACK_TOPS
-    if "pants" in n or "褲" in n or category == "pants": return URL_FALLBACK_PANTS
+    # ── 3. 分類 fallback ──────────────────────────────────────────────────────
+    top_keywords   = ("shirt", "襯衫", "blouse", "top", "tee")
+    pants_keywords = ("pants", "褲", "trouser", "cargo", "jeans")
+
+    if any(k in n for k in top_keywords) or category == "top":
+        return URL_FALLBACK_TOPS
+    if any(k in n for k in pants_keywords) or category == "pants":
+        return URL_FALLBACK_PANTS
     return URL_FALLBACK_OTHERS
 
 # ─── Results Display ──────────────────────────────────────────────────────────
