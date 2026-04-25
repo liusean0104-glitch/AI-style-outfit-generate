@@ -621,60 +621,110 @@ def _ddg_search_one(query: str, max_results: int = 3) -> str | None:
         pass
     return None
 
-async def _race_queries(queries: list[str]) -> str | None:
-    """
-    並行跑所有 query，回傳最先成功的結果。
-    用 asyncio + executor 包住同步的 DDGS，避免 blocking event loop。
-    """
+async def _race_queries(queries: list[str]) -> list[str]:
+    """並行跑所有 query，收集所有成功結果（去重）。"""
     loop = asyncio.get_event_loop()
+    tasks = [loop.run_in_executor(None, _ddg_search_one, q) for q in queries]
+    
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # 去重、過濾 None
+    seen = set()
+    unique = []
+    for r in results:
+        if r and isinstance(r, str) and r not in seen:
+            seen.add(r)
+            unique.append(r)
+    return unique
 
-    tasks = [
-        loop.run_in_executor(None, _ddg_search_one, q)
-        for q in queries
-    ]
-
-    for coro in asyncio.as_completed(tasks):
-        result = await coro
-        if result:
-            # 找到就取消其餘 task，不再等待
-            for t in tasks:
-                t.cancel()
-            return result
-
-    return None
-
-def get_zara_image(item_name: str, gender: str, category: str = "others") -> str:
+def get_zara_images(item_name: str, gender: str, category: str = "others") -> list[str]:
+    """回傳多張圖片 URL 的 list。"""
     n = item_name.lower().strip()
     g = "man" if gender in ["Male", "男性"] else "woman"
 
-    # ── 1. 精確比對 ──────────────────────────────────────────────────────────
+    # 1. 精確比對（只有一張，直接包成 list）
     for key, url in SPECIFIC_ITEM_IMAGES.items():
         if key in n:
-            return url
+            return [url]
 
-    # ── 2. 並行搜尋（誰快用誰）──────────────────────────────────────────────
+    # 2. 並行搜尋，收集全部結果
     queries = [
-        f"zara {g} {item_name} outfit",        # 有品牌感，圖品質較好
-        f"{g} {item_name} fashion product",    # 無品牌，命中率更高
-        f"{item_name} clothing lookbook",      # 最寬鬆保底
+        f"zara {g} {item_name} outfit",
+        f"{g} {item_name} fashion product",
+        f"{item_name} clothing lookbook",
     ]
 
     try:
-        result = asyncio.run(_race_queries(queries))
-        if result:
-            return result
+        results = asyncio.run(_race_queries(queries))
+        if results:
+            return results
     except Exception:
         pass
 
-    # ── 3. 分類 fallback ──────────────────────────────────────────────────────
+    # 3. Fallback
     top_keywords   = ("shirt", "襯衫", "blouse", "top", "tee")
     pants_keywords = ("pants", "褲", "trouser", "cargo", "jeans")
-
     if any(k in n for k in top_keywords) or category == "top":
-        return URL_FALLBACK_TOPS
+        return [URL_FALLBACK_TOPS]
     if any(k in n for k in pants_keywords) or category == "pants":
-        return URL_FALLBACK_PANTS
-    return URL_FALLBACK_OTHERS
+        return [URL_FALLBACK_PANTS]
+    return [URL_FALLBACK_OTHERS]
+
+def render_image_carousel(item_key: str, urls: list[str]):
+    """
+    處理 Streamlit 中的圖片左右切換。
+    """
+    if not urls:
+        return
+
+    idx_key = f"img_idx_{item_key.replace(' ', '_')}"
+
+    if idx_key not in st.session_state:
+        st.session_state[idx_key] = 0
+
+    idx = st.session_state[idx_key]
+    total = len(urls)
+
+    if total > 1:
+        # 使用自定義容器保持 ZARA 比例，並加上導航按鈕
+        col_prev, col_main, col_next = st.columns([1, 8, 1])
+        
+        with col_prev:
+            st.markdown("<div style='height: 80px;'></div>", unsafe_allow_html=True)
+            if st.button("‹", key=f"prev_{idx_key}", disabled=(idx == 0)):
+                st.session_state[idx_key] -= 1
+                st.rerun()
+
+        with col_main:
+            img_url = urls[idx]
+            st.markdown(
+                f"""
+                <div class="img-container">
+                    <img src="{img_url}">
+                </div>
+                <div style="text-align:center; font-family:'Inter',sans-serif; font-size:0.7rem; color:#888; margin-top:5px;">
+                    {idx + 1} / {total}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        with col_next:
+            st.markdown("<div style='height: 80px;'></div>", unsafe_allow_html=True)
+            if st.button("›", key=f"next_{idx_key}", disabled=(idx == total - 1)):
+                st.session_state[idx_key] += 1
+                st.rerun()
+    else:
+        # 只有一張就維持原樣
+        img_url = urls[0]
+        st.markdown(
+            f"""
+            <div class="img-container">
+                <img src="{img_url}">
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 # ─── Results Display ──────────────────────────────────────────────────────────
 if st.session_state.last_result:
@@ -715,19 +765,12 @@ if st.session_state.last_result:
         name_brand = item.get("name", "")
         reason     = item.get("reason", "")
         category   = item.get("category", "others")
-        img_url    = get_zara_image(name_brand, user_gender, category)
+        img_urls   = get_zara_images(name_brand, user_gender, category)
 
-        col_img, col_txt = st.columns([1, 1.5])
+        col_img_area, col_txt = st.columns([1, 1.5])
 
-        with col_img:
-            st.markdown(
-                f"""
-                <div class="img-container">
-                    <img src="{img_url}" style="width:100%; height:100%; object-fit:cover; display:block;">
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+        with col_img_area:
+            render_image_carousel(item_key=name_brand, urls=img_urls)
 
         with col_txt:
             # Item name — bold, uppercase
