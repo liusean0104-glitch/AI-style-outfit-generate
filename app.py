@@ -312,9 +312,9 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
     
     specific_style_rule = ""
     if lang == "繁體中文":
-        p_cc_name = "教士隊城市限定球衣 (Padres City Connect Jersey)"
+        p_cc_name = "教士隊城市限定球衣"
         p_cc_reason = "這套穿搭的核心單品。"
-        p_home_name = "教士隊主場球衣 (Padres Home Jersey)"
+        p_home_name = "教士隊主場球衣"
         p_home_reason = "這套穿搭的核心單品。"
         p_price = "球隊商店限定"
     else:
@@ -591,7 +591,9 @@ SPECIFIC_ITEM_IMAGES = {
     "sleeveless satin blouse":   "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
     "linen blend trousers":      "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
     "padres city connect jersey":"https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
-    "padres home jersey":        "https://i.postimg.cc/4xBkzZVC/home-jersey.avif"
+    "教士隊城市限定球衣":        "https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
+    "padres home jersey":        "https://i.postimg.cc/4xBkzZVC/home-jersey.avif",
+    "教士隊主場球衣":            "https://i.postimg.cc/4xBkzZVC/home-jersey.avif"
 }
 
 VALID_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".avif")
@@ -762,10 +764,27 @@ if st.session_state.last_result:
 
     zara_items = res.get("zara_items", [])
     for idx, item in enumerate(zara_items):
-        name_brand = item.get("name", "")
+        raw_name   = item.get("name", "")
         reason     = item.get("reason", "")
         category   = item.get("category", "others")
-        img_urls   = get_zara_images(name_brand, user_gender, category)
+        
+        # 清理名稱：移除括號中多餘的語言 (例如 "名稱 (English)" -> "名稱")
+        import re
+        match = re.search(r'(.+?)\s*\((.+?)\)', raw_name)
+        if match:
+            part1 = match.group(1).strip()
+            part2 = match.group(2).strip()
+            has_chinese_p1 = any('\u4e00' <= c <= '\u9fff' for c in part1)
+            has_chinese_p2 = any('\u4e00' <= c <= '\u9fff' for c in part2)
+            
+            if lang_select == "繁體中文":
+                name_brand = part1 if has_chinese_p1 else (part2 if has_chinese_p2 else raw_name)
+            else:
+                name_brand = part1 if not has_chinese_p1 else (part2 if not has_chinese_p2 else raw_name)
+        else:
+            name_brand = raw_name
+
+        img_urls   = get_zara_images(raw_name, user_gender, category) # 爬圖用原始名稱更準確
 
         col_img_area, col_txt = st.columns([1, 1.5])
 
@@ -798,7 +817,7 @@ if st.session_state.last_result:
                 unsafe_allow_html=True
             )
             # ZARA gender-aware Discover button (skip for Padres jerseys)
-            if "Padres" not in name_brand:
+            if "Padres" not in name_brand and "教士隊" not in name_brand:
                 search_query = urllib.parse.quote(name_brand)
                 section  = "MAN" if user_gender in ["Male", "男性"] else "WOMAN"
                 zara_url = f"https://www.zara.com/tw/zt/search?searchTerm={search_query}&section={section}"
