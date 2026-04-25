@@ -31,8 +31,17 @@ sb_key = get_secret("SUPABASE_KEY")
 
 st.set_page_config(page_title="AI Stylist", page_icon="👗", layout="centered")
 
+import uuid
+
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
+
+# 產生並持久化 session_id（不需登入，重新整理後保留）
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+
+if "rec_id" not in st.session_state:
+    st.session_state.rec_id = None  # 最新一次推薦的 ID
 
 # 2. 注入自定義 CSS (Minimalist Luxury / ZARA Aesthetic)
 st.markdown("""
@@ -245,32 +254,99 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def track_dislike():
-    log_event("dislike")
-    st.toast("We'll do better next time! / 我們會繼續改進！")
-
-def log_event(event_type, item_name=None):
-    """Logs an event to Supabase via REST API."""
+def _supabase_post(table: str, payload: dict):
+    """共用的 Supabase REST 寫入，失敗只印 console 不中斷 UI。"""
     if not sb_url or not sb_key:
-        return
-
-    url = f"{sb_url}/rest/v1/fashion_analytics"
+        return None
+    url = f"{sb_url}/rest/v1/{table}"
     headers = {
         "apikey": sb_key,
         "Authorization": f"Bearer {sb_key}",
         "Content-Type": "application/json",
-        "Prefer": "return=minimal"
+        "Prefer": "return=representation",  # 改成 representation 才能拿到回傳的 id
     }
-    payload = {"event_type": event_type, "item_name": item_name}
     try:
-        # Use a background thread or a short timeout to not block UI
-        requests.post(url, headers=headers, json=payload, timeout=2)
-    except:
-        pass
+        r = requests.post(url, headers=headers, json=payload, timeout=3)
+        if r.ok:
+            data = r.json()
+            return data[0] if data else None
+        else:
+            print(f"[Supabase] {table} write failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"[Supabase] {table} exception: {e}")
+    return None
+
+
+def log_session(gender, height, weight, season, occasion, weather, styles, language, has_photo):
+    """
+    在 sessions 表寫入這次的用戶 profile。
+    用 UPSERT（on_conflict=session_id）避免重複 generate 時重複寫。
+    """
+    if not sb_url or not sb_key:
+        return
+    url = f"{sb_url}/rest/v1/sessions"
+    headers = {
+        "apikey": sb_key,
+        "Authorization": f"Bearer {sb_key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+    payload = {
+        "id": st.session_state.session_id,
+        "gender": gender,
+        "height_cm": height,
+        "weight_kg": weight,
+        "season": season,
+        "occasion": occasion,
+        "weather": weather,
+        "styles": styles,          # Supabase 支援 text[] → 傳 Python list 即可
+        "language": language,
+        "has_photo_upload": has_photo,
+    }
+    try:
+        requests.post(url, headers=headers, json=payload, timeout=3)
+    except Exception as e:
+        print(f"[Supabase] sessions upsert exception: {e}")
+
+
+def log_recommendation(result: dict) -> str | None:
+    """
+    把 AI 推薦結果寫入 recommendations 表，回傳新建的 rec_id。
+    """
+    payload = {
+        "session_id": st.session_state.session_id,
+        "model_used": result.get("model_used", "unknown"),
+        "zara_items": result.get("zara_items", []),
+        "other_brands": result.get("other_brands", []),
+        "accessories": result.get("accessories", []),
+        # latency_ms 在 generate 那邊計算後傳入，這裡預設 None
+        "latency_ms": result.get("latency_ms"),
+    }
+    row = _supabase_post("recommendations", payload)
+    return row["id"] if row else None
+
+
+def log_event(event_type: str, item_name: str | None = None):
+    """
+    通用事件寫入：generate / like / dislike / discover_click
+    """
+    payload = {
+        "session_id": st.session_state.session_id,
+        "rec_id": st.session_state.rec_id,   # 可能是 None（generate 之前）
+        "event_type": event_type,
+        "item_name": item_name,
+    }
+    _supabase_post("events", payload)
+
 
 def track_like():
     log_event("like")
     st.toast("Thank you! / 感謝您的回饋！")
+
+
+def track_dislike():
+    log_event("dislike")
+    st.toast("We'll do better next time! / 我們會繼續改進！")
 
 # 2. 核心 AI 函數
 GEMMA_MODELS = [
@@ -417,9 +493,6 @@ def get_base64_image(path):
         with open(path, "rb") as f:
             return base64.b64encode(f.read()).decode()
     return ""
-
-if "last_result" not in st.session_state:
-    st.session_state.last_result = None
 
 # Static Header (Same for both languages)
 st.markdown('<div class="magazine-title">VOGUE AI STYLIST</div>', unsafe_allow_html=True)
@@ -576,7 +649,29 @@ if st.button(t["btn"]):
     if err:
         st.error(f"STYLING SERVICE UNAVAILABLE: {err}")
     else:
+        # 計算 latency（在 ThreadPoolExecutor 外面算，用 start_time）
+        result["latency_ms"] = int((time.time() - start_time) * 1000)
+
         st.session_state.last_result = result
+
+        # 1. 寫入 session（用戶 profile）
+        log_session(
+            gender=user_gender,
+            height=user_height,
+            weight=user_weight,
+            season=user_season,
+            occasion=user_occ,
+            weather=user_wea,
+            styles=user_sty,
+            language=lang_select,
+            has_photo=uploaded_file is not None,
+        )
+
+        # 2. 寫入推薦結果，拿到 rec_id
+        rec_id = log_recommendation(result)
+        st.session_state.rec_id = rec_id
+
+        # 3. 寫入 generate 事件
         log_event("generate")
 
 # ─── Image Engine ──────────────────────────────────────────────────────────
