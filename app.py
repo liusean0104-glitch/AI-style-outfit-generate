@@ -165,7 +165,7 @@ st.markdown("""
         100% { left: 100%; }
     }
     
-    /* Hide number input spinners */
+    /* Hide number input spinners (Standard) */
     input::-webkit-outer-spin-button,
     input::-webkit-inner-spin-button {
         -webkit-appearance: none;
@@ -173,6 +173,12 @@ st.markdown("""
     }
     input[type=number] {
         -moz-appearance: textfield;
+    }
+    
+    /* Hide number input spinners (Streamlit Specific) */
+    button[data-testid="stNumberInputStepUp"],
+    button[data-testid="stNumberInputStepDown"] {
+        display: none !important;
     }
 
     .loading-tip {
@@ -213,11 +219,24 @@ st.markdown("""
             display: none !important;
         }
         .magazine-title {
-            font-size: 2.2rem;
+            font-size: 2.2rem !important;
+            margin-top: 1rem;
         }
         .magazine-subtitle {
-            letter-spacing: 2px;
-            font-size: 0.6rem;
+            letter-spacing: 2px !important;
+            font-size: 0.6rem !important;
+            margin-bottom: 1.5rem !important;
+        }
+        
+        /* Force columns to stay side-by-side on mobile */
+        [data-testid="stHorizontalBlock"] {
+            flex-direction: row !important;
+            flex-wrap: nowrap !important;
+            gap: 10px !important;
+        }
+        [data-testid="stHorizontalBlock"] > div {
+            min-width: 0 !important;
+            flex: 1 1 0% !important;
         }
     }
 
