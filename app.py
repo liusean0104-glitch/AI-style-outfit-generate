@@ -35,13 +35,10 @@ import uuid
 
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
-
-# 產生並持久化 session_id（不需登入，重新整理後保留）
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
-
 if "rec_id" not in st.session_state:
-    st.session_state.rec_id = None  # 最新一次推薦的 ID
+    st.session_state.rec_id = None
 
 # 2. 注入自定義 CSS (Minimalist Luxury / ZARA Aesthetic)
 st.markdown("""
@@ -254,8 +251,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def _supabase_post(table: str, payload: dict):
-    """共用的 Supabase REST 寫入，失敗只印 console 不中斷 UI。"""
+def _sb_post(table: str, payload: dict, prefer: str = "return=minimal"):
+    """共用寫入，失敗只印 console。"""
     if not sb_url or not sb_key:
         return None
     url = f"{sb_url}/rest/v1/{table}"
@@ -263,25 +260,22 @@ def _supabase_post(table: str, payload: dict):
         "apikey": sb_key,
         "Authorization": f"Bearer {sb_key}",
         "Content-Type": "application/json",
-        "Prefer": "return=representation",  # 改成 representation 才能拿到回傳的 id
+        "Prefer": prefer,
     }
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=3)
-        if r.ok:
+        if r.ok and prefer == "return=representation":
             data = r.json()
             return data[0] if data else None
-        else:
-            print(f"[Supabase] {table} write failed: {r.status_code} {r.text[:200]}")
+        elif not r.ok:
+            print(f"[Supabase] {table} error: {r.status_code} {r.text[:200]}")
     except Exception as e:
         print(f"[Supabase] {table} exception: {e}")
     return None
 
 
 def log_session(gender, height, weight, season, occasion, weather, styles, language, has_photo):
-    """
-    在 sessions 表寫入這次的用戶 profile。
-    用 UPSERT（on_conflict=session_id）避免重複 generate 時重複寫。
-    """
+    """Upsert 用戶 profile 到 sessions 表。"""
     if not sb_url or not sb_key:
         return
     url = f"{sb_url}/rest/v1/sessions"
@@ -294,12 +288,12 @@ def log_session(gender, height, weight, season, occasion, weather, styles, langu
     payload = {
         "id": st.session_state.session_id,
         "gender": gender,
-        "height_cm": height,
-        "weight_kg": weight,
+        "height_cm": int(height),
+        "weight_kg": int(weight),
         "season": season,
         "occasion": occasion,
         "weather": weather,
-        "styles": styles,          # Supabase 支援 text[] → 傳 Python list 即可
+        "styles": styles,
         "language": language,
         "has_photo_upload": has_photo,
     }
@@ -309,34 +303,29 @@ def log_session(gender, height, weight, season, occasion, weather, styles, langu
         print(f"[Supabase] sessions upsert exception: {e}")
 
 
-def log_recommendation(result: dict) -> str | None:
-    """
-    把 AI 推薦結果寫入 recommendations 表，回傳新建的 rec_id。
-    """
+def log_recommendation(result: dict):
+    """寫入推薦結果到 recommendations 表，回傳 rec_id。"""
     payload = {
         "session_id": st.session_state.session_id,
         "model_used": result.get("model_used", "unknown"),
         "zara_items": result.get("zara_items", []),
         "other_brands": result.get("other_brands", []),
         "accessories": result.get("accessories", []),
-        # latency_ms 在 generate 那邊計算後傳入，這裡預設 None
         "latency_ms": result.get("latency_ms"),
     }
-    row = _supabase_post("recommendations", payload)
+    row = _sb_post("recommendations", payload, prefer="return=representation")
     return row["id"] if row else None
 
 
-def log_event(event_type: str, item_name: str | None = None):
-    """
-    通用事件寫入：generate / like / dislike / discover_click
-    """
+def log_event(event_type: str, item_name: str = None):
+    """寫入行為事件到 events 表。"""
     payload = {
         "session_id": st.session_state.session_id,
-        "rec_id": st.session_state.rec_id,   # 可能是 None（generate 之前）
+        "rec_id": st.session_state.rec_id,
         "event_type": event_type,
         "item_name": item_name,
     }
-    _supabase_post("events", payload)
+    _sb_post("events", payload)
 
 
 def track_like():
@@ -649,12 +638,10 @@ if st.button(t["btn"]):
     if err:
         st.error(f"STYLING SERVICE UNAVAILABLE: {err}")
     else:
-        # 計算 latency（在 ThreadPoolExecutor 外面算，用 start_time）
         result["latency_ms"] = int((time.time() - start_time) * 1000)
-
         st.session_state.last_result = result
 
-        # 1. 寫入 session（用戶 profile）
+        # 依序寫入三張表
         log_session(
             gender=user_gender,
             height=user_height,
@@ -666,12 +653,8 @@ if st.button(t["btn"]):
             language=lang_select,
             has_photo=uploaded_file is not None,
         )
-
-        # 2. 寫入推薦結果，拿到 rec_id
         rec_id = log_recommendation(result)
         st.session_state.rec_id = rec_id
-
-        # 3. 寫入 generate 事件
         log_event("generate")
 
 # ─── Image Engine ──────────────────────────────────────────────────────────
@@ -918,7 +901,16 @@ if st.session_state.last_result:
                 zara_url = f"https://www.zara.com/tw/zt/search?searchTerm={search_query}&section={section}"
                 
                 # Cloud-compatible Discover Link
-                st.link_button(t["buy"], zara_url)
+                # Discover 按鈕：點了記錄事件 + 用 HTML 直接跳 ZARA
+                btn_key = f"discover_{idx}"
+                if st.button(t["buy"], key=btn_key, type="primary"):
+                    log_event("discover_click", item_name=name_brand)
+                    # 注入 JavaScript 以在新分頁開啟 ZARA，不顯示多餘文字
+                    st.components.v1.html(
+                        f"<script>window.open('{zara_url}', '_blank');</script>",
+                        height=0,
+                        width=0,
+                    )
 
         if idx < len(zara_items) - 1:
             st.divider()
