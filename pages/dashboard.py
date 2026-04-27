@@ -108,6 +108,17 @@ def sb_get(table_or_view: str, params: dict = None) -> list[dict]:
         st.error(f"連線失敗：{e}")
         return []
 
+def sb_get_events(date_from_str, date_to_str):
+    url = f"{sb_url}/rest/v1/events"
+    headers = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
+    params = [
+        ("select", "event_type,item_name,created_at"),
+        ("created_at", f"gte.{date_from_str}"),
+        ("created_at", f"lt.{date_to_str}"),
+    ]
+    r = requests.get(url, headers=headers, params=params, timeout=8)
+    return r.json() if r.ok else []
+
 def sb_rpc(func_name: str, payload: dict = None) -> list[dict]:
     """呼叫 Supabase RPC function。"""
     if not sb_url or not sb_key:
@@ -158,10 +169,7 @@ events_raw = sb_get("events", {
     "select": "event_type",
 })
 # PostgREST 支援 range filter
-events_all = sb_get("events", {
-    "select": "event_type,created_at",
-    "created_at": f"gte.{date_from_str}&created_at=lt.{date_to_str}",
-})
+events_all = sb_get_events(date_from_str, date_to_str)
 
 # 計算各指標
 generates  = sum(1 for e in events_all if e.get("event_type") == "generate")
