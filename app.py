@@ -578,6 +578,11 @@ if uploaded_file:
 # 5. 執行按鈕
 st.markdown("<br>", unsafe_allow_html=True)
 if st.button(t["btn"]):
+    # 清除舊的圖片與曝光 cache，避免重新生成時殘留
+    for key in list(st.session_state.keys()):
+        if key.startswith("img_") or key.startswith("imp_"):
+            del st.session_state[key]
+
     # Luxury Curating UI Setup
     TIPS = {
         "繁體中文": [
