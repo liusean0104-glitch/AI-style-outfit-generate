@@ -2,14 +2,10 @@ import streamlit as st
 import os
 import google.generativeai as genai
 from dotenv import load_dotenv
-import webbrowser
 import json
 import urllib.parse
-import random
 import requests
-import asyncio
 import time
-from duckduckgo_search import DDGS
 
 # 1. 載入與設定
 load_dotenv(override=True)
@@ -695,30 +691,37 @@ def get_item_image(item_name: str, gender: str, category: str = "others") -> str
     # 2. Google Custom Search API（白底單品圖）
     if google_api_key and google_cx:
         try:
-            # 用英文搜尋效果更好
-            query = f"{item_name} {g} fashion white background product"
+            query = f"{item_name} {g} white background product photo"
             params = {
                 "key": google_api_key,
                 "cx":  google_cx,
                 "q":   query,
                 "searchType": "image",
                 "imgType":    "photo",
+                "imgDominantColor": "white",
                 "num":        5,
                 "safe":       "active",
             }
             r = requests.get(
                 "https://www.googleapis.com/customsearch/v1",
                 params=params,
-                timeout=5,
+                timeout=6,
             )
+            print(f"[Google CSE] status={r.status_code} query={query[:50]}")
             if r.ok:
                 items = r.json().get("items", [])
+                print(f"[Google CSE] got {len(items)} results")
                 for item in items:
                     url = item.get("link", "")
                     if url and url.startswith("http"):
+                        print(f"[Google CSE] returning: {url[:80]}")
                         return url
+            else:
+                print(f"[Google CSE] error body: {r.text[:300]}")
         except Exception as e:
-            print(f"[Google CSE] error: {e}")
+            print(f"[Google CSE] exception: {e}")
+    else:
+        print(f"[Google CSE] skipped — api_key={'set' if google_api_key else 'MISSING'} cx={'set' if google_cx else 'MISSING'}")
 
     # 3. Fallback
     top_kw   = ("shirt", "襯衫", "blouse", "top", "tee", "jacket", "coat", "外套", "上衣")
