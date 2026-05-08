@@ -339,14 +339,15 @@ def track_dislike():
 
 # 2. 核心 AI 函數
 GEMMA_MODELS = [
-    'gemma-4-26b-a4b-it',  # 預設優先
-    'gemini-2.0-flash',
+    'gemini-2.0-flash', # Keep gemini as first priority just in case it works
     'gemma-4-31b-it',
+    'gemma-4-26b-a4b-it',
     'gemma-3-27b-it',
     'gemma-3-12b-it',
     'gemma-3-4b-it',
     'gemma-3-1b-it',
     'gemma-3n-e4b-it',
+    'gemma-3n-e2b-it'
 ]
 
 def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, uploaded_image=None):
@@ -665,20 +666,106 @@ if st.button(t["btn"]):
 google_api_key = get_secret("GOOGLE_API_KEY")
 google_cx      = get_secret("GOOGLE_CX")
 
-URL_FALLBACK_TOPS   = "https://i.postimg.cc/7Z4QNfN7/shirts.jpg"
-URL_FALLBACK_PANTS  = "https://i.postimg.cc/j233g442/pants.jpg"
-URL_FALLBACK_OTHERS = "https://i.postimg.cc/13K77sWH/loafers.jpg"
+# Fallback — Unsplash 穩定圖源（不會失效）
+URL_FALLBACK_TOPS   = "https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=600&q=80"
+URL_FALLBACK_PANTS  = "https://images.unsplash.com/photo-1542272604-787c3835535d?w=600&q=80"
+URL_FALLBACK_SKIRT  = "https://images.unsplash.com/photo-1583496661160-fb5218e5b0b5?w=600&q=80"
+URL_FALLBACK_SHOES  = "https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=600&q=80"
+URL_FALLBACK_OTHERS = "https://images.unsplash.com/photo-1523381210434-271e8be1f52b?w=600&q=80"
 
 SPECIFIC_ITEM_IMAGES = {
-    "strappy heeled sandals":    "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
-    "wide leg cargo pant":       "https://i.postimg.cc/bNJTFh23/wide-leg-cargo-pant.jpg",
-    "cropped linen blend shirt": "https://i.postimg.cc/Qxtbn3WS/women-Cropped-Linen-Blend-Shirt.jpg",
-    "sleeveless satin blouse":   "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
-    "linen blend trousers":      "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
-    "padres city connect jersey":"https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
-    "教士隊城市限定球衣":        "https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
-    "padres home jersey":        "https://i.postimg.cc/4xBkzZVC/home-jersey.avif",
-    "教士隊主場球衣":            "https://i.postimg.cc/4xBkzZVC/home-jersey.avif"
+
+    # ── MAN ────────────────────────────────────────────────────
+    "linen blend oversize shirt":   "https://i.postimg.cc/Zq954QGz/kuan-song-chen-shan.jpg",
+    "linen oversize shirt":         "https://i.postimg.cc/Zq954QGz/kuan-song-chen-shan.jpg",
+    "亞麻寬鬆襯衫":                 "https://i.postimg.cc/Zq954QGz/kuan-song-chen-shan.jpg",
+    "寬鬆亞麻襯衫":                 "https://i.postimg.cc/Zq954QGz/kuan-song-chen-shan.jpg",
+    "亞麻襯衫":                     "https://i.postimg.cc/Zq954QGz/kuan-song-chen-shan.jpg",
+
+    "man jeans":                    "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
+    "男牛仔褲":                     "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
+
+    "white t-shirt":                "https://i.postimg.cc/vZ2mRyNR/bai-se-T-Shirt.jpg",
+    "white tee":                    "https://i.postimg.cc/vZ2mRyNR/bai-se-T-Shirt.jpg",
+    "白色t":                        "https://i.postimg.cc/vZ2mRyNR/bai-se-T-Shirt.jpg",
+    "白t":                          "https://i.postimg.cc/vZ2mRyNR/bai-se-T-Shirt.jpg",
+
+    "canvas sneaker":               "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
+    "白色帆布鞋":                   "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
+    "帆布鞋":                       "https://i.postimg.cc/JzYhw82M/fan-bu-xie.jpg",
+
+    "wide leg trouser":             "https://i.postimg.cc/x1pdrQ41/kuan-xi-zhuang-zhang-ku.jpg",
+    "oversized suit pant":          "https://i.postimg.cc/x1pdrQ41/kuan-xi-zhuang-zhang-ku.jpg",
+    "寬鬆西裝":                     "https://i.postimg.cc/x1pdrQ41/kuan-xi-zhuang-zhang-ku.jpg",
+    "西裝長褲":                     "https://i.postimg.cc/JzYhw827/xi-zhuang-zhang-ku.jpg",
+
+    "loafer":                       "https://i.postimg.cc/qvD7fr5p/pi-le-fu-xie.jpg",
+    "樂福鞋":                       "https://i.postimg.cc/qvD7fr5p/pi-le-fu-xie.jpg",
+    "皮質樂福鞋":                   "https://i.postimg.cc/qvD7fr5p/pi-le-fu-xie.jpg",
+
+    "polo shirt":                   "https://i.postimg.cc/fRqb4sgr/polo-shan.jpg",
+    "polo衫":                       "https://i.postimg.cc/fRqb4sgr/polo-shan.jpg",
+    "polo 衫":                      "https://i.postimg.cc/fRqb4sgr/polo-shan.jpg",
+
+    # ── WOMAN ──────────────────────────────────────────────────
+    "wide leg pant":                "https://i.postimg.cc/0y7qns1n/nu-kuan-ku.jpg",
+    "女寬鬆長褲":                   "https://i.postimg.cc/0y7qns1n/nu-kuan-ku.jpg",
+    "寬鬆長褲":                     "https://i.postimg.cc/0y7qns1n/nu-kuan-ku.jpg",
+
+    "linen blend trouser":          "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
+    "linen trouser":                "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
+    "linen blend trousers":         "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
+    "亞麻長褲":                     "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
+
+    "sleeveless satin blouse":      "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
+    "satin blouse":                 "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
+    "無袖緞面上衣":                 "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
+    "緞面無袖":                     "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
+
+    "midi skirt":                   "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "satin skirt":                  "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "mini skirt":                   "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "denim skirt":                  "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "中長裙":                       "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "緞面裙":                       "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "迷你裙":                       "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "丹寧裙":                       "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "短裙":                         "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+
+    "woman jean":                   "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
+    "女牛仔褲":                     "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
+    "低腰牛仔褲":                   "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
+    "低腰寬版牛仔褲":               "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
+    "wide leg jean":                "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
+    "low rise jean":                "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
+
+    "ribbed t-shirt":               "https://i.postimg.cc/766cFvdV/nu-luo-wen-duan-xiu-T-shirt.jpg",
+    "ribbed tee":                   "https://i.postimg.cc/766cFvdV/nu-luo-wen-duan-xiu-T-shirt.jpg",
+    "螺紋t":                        "https://i.postimg.cc/766cFvdV/nu-luo-wen-duan-xiu-T-shirt.jpg",
+    "螺紋上衣":                     "https://i.postimg.cc/766cFvdV/nu-luo-wen-duan-xiu-T-shirt.jpg",
+
+    "crop t-shirt":                 "https://i.postimg.cc/GhwRy2Zy/duan-ban-Tshirt.jpg",
+    "cropped tee":                  "https://i.postimg.cc/GhwRy2Zy/duan-ban-Tshirt.jpg",
+    "y2k t":                        "https://i.postimg.cc/GhwRy2Zy/duan-ban-Tshirt.jpg",
+    "短版t":                        "https://i.postimg.cc/GhwRy2Zy/duan-ban-Tshirt.jpg",
+    "短版上衣":                     "https://i.postimg.cc/GhwRy2Zy/duan-ban-Tshirt.jpg",
+
+    "strappy heeled sandal":        "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
+    "strappy sandal":               "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
+    "strappy heeled sandals":       "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
+    "平底鞋":                       "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
+    "涼鞋":                         "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
+
+    "cropped linen blend shirt":    "https://i.postimg.cc/Qxtbn3WS/women-Cropped-Linen-Blend-Shirt.jpg",
+    "cropped linen shirt":          "https://i.postimg.cc/Qxtbn3WS/women-Cropped-Linen-Blend-Shirt.jpg",
+    "女寬鬆襯衫":                   "https://i.postimg.cc/Qxtbn3WS/women-Cropped-Linen-Blend-Shirt.jpg",
+    "女亞麻襯衫":                   "https://i.postimg.cc/Qxtbn3WS/women-Cropped-Linen-Blend-Shirt.jpg",
+
+    # ── Padres（保留不動）───────────────────────────────────────
+    "padres city connect jersey":   "https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
+    "教士隊城市限定球衣":           "https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
+    "padres home jersey":           "https://i.postimg.cc/4xBkzZVC/home-jersey.avif",
+    "教士隊主場球衣":               "https://i.postimg.cc/4xBkzZVC/home-jersey.avif",
 }
 
 def get_item_image(item_name: str, gender: str, category: str = "others") -> str:
@@ -719,13 +806,19 @@ def get_item_image(item_name: str, gender: str, category: str = "others") -> str
         except Exception as e:
             print(f"[Google CSE] error: {e}")
 
-    # 3. Fallback
-    top_kw   = ("shirt", "襯衫", "blouse", "top", "tee", "jacket", "coat", "外套", "上衣")
-    pants_kw = ("pants", "褲", "trouser", "cargo", "jeans", "skirt", "裙")
+    # 3. Fallback（依類別給不同圖）
+    top_kw   = ("shirt", "襯衫", "blouse", "top", "tee", "jacket", "coat", "外套", "上衣", "polo", "knit", "針織", "sweater")
+    pants_kw = ("pants", "trousers", "cargo", "jeans", "牛仔褲", "長褲", "寬褲", "短褲", "shorts")
+    skirt_kw = ("skirt", "裙")
+    shoes_kw = ("shoes", "sneaker", "loafer", "sandal", "boot", "鞋", "靴")
     if any(k in n for k in top_kw) or category == "top":
         return URL_FALLBACK_TOPS
+    if any(k in n for k in skirt_kw):
+        return URL_FALLBACK_SKIRT
     if any(k in n for k in pants_kw) or category == "pants":
         return URL_FALLBACK_PANTS
+    if any(k in n for k in shoes_kw):
+        return URL_FALLBACK_SHOES
     return URL_FALLBACK_OTHERS
 
 # ─── Results Display ──────────────────────────────────────────────────────────
