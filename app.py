@@ -346,7 +346,7 @@ GEMMA_MODELS = [
     'gemma-3-12b-it',
     'gemma-3-4b-it',
     'gemma-3-1b-it',
-    'gemma-3n-e4b-it',
+    
 ]
 
 def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, uploaded_image=None):
