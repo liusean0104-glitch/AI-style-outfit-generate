@@ -828,36 +828,46 @@ def _normalize_gender(gender: str) -> str:
 
 def get_item_image(item_name: str, gender: str, category: str = "others",
                    style: str = "all", season: str = "all", occasion: str = "all") -> str:
-    """O(1) 查詢：先比對 Padres 特例，再走組合鍵，最後做名稱模糊比對。"""
+    """名稱比對優先，組合鍵僅在有明確 style 時作 fallback。"""
     n = item_name.lower().strip()
 
-    # 1. Padres 特例優先（不論 season）
+    # 1. Padres 特例優先（不論 season / gender）
     for padres_key in ("padres home jersey", "padres city connect jersey",
                        "教士隊主場球衣", "教士隊城市限定球衣"):
         if padres_key in n:
             return _NAME_TO_URL.get(padres_key, "")
 
-    # 2. 組合鍵 O(1) 查詢
-    g  = _normalize_gender(gender)
-    st = style.lower()
-    se = season.lower()
-    oc = occasion.lower()
-    ca = category.lower()
-    composite_key = f"{g}_{st}_{se}_{oc}_{ca}"
-    if composite_key in COMPOSITE_DICT:
-        return COMPOSITE_DICT[composite_key]
+    # 2. 名稱直接命中 _NAME_TO_URL
+    direct = _NAME_TO_URL.get(n)
+    if direct:
+        return direct
 
-    # 3. 透過別名表找到標準名稱，再查 _NAME_TO_URL
+    # 3. 別名表 → _NAME_TO_URL
     canonical = _NAME_ALIASES.get(n)
     if canonical:
         url = _NAME_TO_URL.get(canonical.lower(), "")
         if url:
             return url
 
-    # 4. 子字串模糊比對（fallback）
+    # 4. 子字串模糊比對（AI 輸出常帶品牌前綴，如 "ZARA 亞麻混紡寬版襯衫"）
     for key, url in _NAME_TO_URL.items():
         if key in n or n in key:
             return url
+
+    # 5. 有明確 style 時走組合鍵（Padres / Korean Style 等）
+    if style.lower() != "all":
+        g  = _normalize_gender(gender)
+        st = style.lower()
+        se = season.lower()
+        oc = occasion.lower()
+        ca = category.lower()
+        composite_key = f"{g}_{st}_{se}_{oc}_{ca}"
+        if composite_key in COMPOSITE_DICT:
+            return COMPOSITE_DICT[composite_key]
+        # 也試 gender=all
+        composite_key_all = f"all_{st}_{se}_{oc}_{ca}"
+        if composite_key_all in COMPOSITE_DICT:
+            return COMPOSITE_DICT[composite_key_all]
 
     return ""
 
@@ -921,7 +931,12 @@ if st.session_state.last_result:
         # 圖片 cache：避免每次按鈕 rerun 重新搜尋
         img_cache_key = f"img_{idx}"
         if img_cache_key not in st.session_state:
-            st.session_state[img_cache_key] = get_item_image(raw_name, user_gender, category)
+            # 傳入第一個已選風格供組合鍵 fallback 使用
+            primary_style = user_sty[0] if user_sty else "all"
+            st.session_state[img_cache_key] = get_item_image(
+                raw_name, user_gender, category,
+                style=primary_style, season=user_season, occasion=user_occ
+            )
         img_url = st.session_state[img_cache_key]
 
         col_img_area, col_txt = st.columns([1, 1.5])
