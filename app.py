@@ -666,13 +666,6 @@ if st.button(t["btn"]):
 google_api_key = get_secret("GOOGLE_API_KEY")
 google_cx      = get_secret("GOOGLE_CX")
 
-# Fallback — Unsplash 穩定圖源（不會失效）
-URL_FALLBACK_TOPS   = "https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=600&q=80"
-URL_FALLBACK_PANTS  = "https://images.unsplash.com/photo-1542272604-787c3835535d?w=600&q=80"
-URL_FALLBACK_SKIRT  = "https://images.unsplash.com/photo-1583496661160-fb5218e5b0b5?w=600&q=80"
-URL_FALLBACK_SHOES  = "https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=600&q=80"
-URL_FALLBACK_OTHERS = "https://images.unsplash.com/photo-1523381210434-271e8be1f52b?w=600&q=80"
-
 SPECIFIC_ITEM_IMAGES = {
 
     # ── MAN ────────────────────────────────────────────────────
@@ -769,57 +762,15 @@ SPECIFIC_ITEM_IMAGES = {
 }
 
 def get_item_image(item_name: str, gender: str, category: str = "others") -> str:
-    """回傳單張白底單品圖 URL。優先 Google CSE，失敗才 fallback。"""
+    """回傳單張白底單品圖 URL（靜態字典比對）。"""
     n = item_name.lower().strip()
-    g = "man" if gender in ["Male", "男性"] else "woman"
 
-    # 1. 精確比對靜態圖
+    # 精確比對靜態圖
     for key, url in SPECIFIC_ITEM_IMAGES.items():
         if key in n:
             return url
 
-    # 2. Google Custom Search API（白底單品圖）
-    if google_api_key and google_cx:
-        try:
-            # 用英文搜尋效果更好
-            query = f"{item_name} {g} fashion white background product"
-            params = {
-                "key": google_api_key,
-                "cx":  google_cx,
-                "q":   query,
-                "searchType": "image",
-                "imgType":    "photo",
-                "num":        5,
-                "safe":       "active",
-            }
-            r = requests.get(
-                "https://www.googleapis.com/customsearch/v1",
-                params=params,
-                timeout=5,
-            )
-            if r.ok:
-                items = r.json().get("items", [])
-                for item in items:
-                    url = item.get("link", "")
-                    if url and url.startswith("http"):
-                        return url
-        except Exception as e:
-            print(f"[Google CSE] error: {e}")
-
-    # 3. Fallback（依類別給不同圖）
-    top_kw   = ("shirt", "襯衫", "blouse", "top", "tee", "jacket", "coat", "外套", "上衣", "polo", "knit", "針織", "sweater")
-    pants_kw = ("pants", "trousers", "cargo", "jeans", "牛仔褲", "長褲", "寬褲", "短褲", "shorts")
-    skirt_kw = ("skirt", "裙")
-    shoes_kw = ("shoes", "sneaker", "loafer", "sandal", "boot", "鞋", "靴")
-    if any(k in n for k in top_kw) or category == "top":
-        return URL_FALLBACK_TOPS
-    if any(k in n for k in skirt_kw):
-        return URL_FALLBACK_SKIRT
-    if any(k in n for k in pants_kw) or category == "pants":
-        return URL_FALLBACK_PANTS
-    if any(k in n for k in shoes_kw):
-        return URL_FALLBACK_SHOES
-    return URL_FALLBACK_OTHERS
+    return ""
 
 # ─── Results Display ──────────────────────────────────────────────────────────
 if st.session_state.last_result:
