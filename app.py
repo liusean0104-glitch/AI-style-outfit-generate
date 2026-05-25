@@ -17,15 +17,56 @@ load_dotenv(override=True)
 # API Key & Supabase Logic (Prioritize st.secrets for Cloud deployment)
 def get_secret(key, default=None):
     try:
-        # Check if secrets exist and the key is present
         if key in st.secrets:
             return st.secrets[key]
     except:
-        # Fallback if st.secrets is not initialized or accessible (common in local dev)
         pass
     return os.getenv(key, default)
 
-api_key = get_secret("GEMINI_API_KEY")
+# ── 多組 API Key 輪詢（Round-Robin + Quota-Aware Key Rotation）──
+# 自動從環境變數讀取進來，存在的 key 才加入列表
+ALL_API_KEYS = [
+    k for k in [
+        get_secret("GEMINI_API_KEY"),
+        get_secret("GEMINI_API_KEY_2"),
+        get_secret("GEMINI_API_KEY_3"),
+        get_secret("GEMINI_API_KEY_4"),
+    ] if k  # 過濾掉未設定的 None
+]
+
+# 用 session_state 記錄目前踪到哪個 key
+if "_key_idx" not in st.session_state:
+    st.session_state["_key_idx"] = 0
+if "_key_cooldown" not in st.session_state:
+    st.session_state["_key_cooldown"] = {}  # {key_idx: unix_timestamp 健到不可用}
+
+def _pick_api_key() -> str:
+    """回傳目前可用的 API Key。若該 Key 在冷卻中，自動转到下一個。"""
+    n = len(ALL_API_KEYS)
+    if n == 0:
+        return ""
+    now = time.time()
+    start = st.session_state["_key_idx"]
+    for i in range(n):
+        idx = (start + i) % n
+        cooldown_until = st.session_state["_key_cooldown"].get(idx, 0)
+        if now >= cooldown_until:
+            st.session_state["_key_idx"] = idx
+            return ALL_API_KEYS[idx]
+    # 全部在冷卻中，回傳冷卻時間最短的
+    best = min(st.session_state["_key_cooldown"], key=st.session_state["_key_cooldown"].get)
+    return ALL_API_KEYS[best]
+
+def _mark_key_rate_limited(retry_seconds: int = 60):
+    """將目前 Key 標記為冷卻中，並輪至下一個。"""
+    idx = st.session_state["_key_idx"]
+    st.session_state["_key_cooldown"][idx] = time.time() + retry_seconds
+    next_idx = (idx + 1) % len(ALL_API_KEYS)
+    st.session_state["_key_idx"] = next_idx
+    print(f"[KeyRotation] Key #{idx} rate-limited, switching to Key #{next_idx}")
+
+# 對外相容：舊程式碼使用單一 api_key 變數的地方仍可作用
+api_key = ALL_API_KEYS[0] if ALL_API_KEYS else None
 sb_url = get_secret("SUPABASE_URL")
 sb_key = get_secret("SUPABASE_KEY")
 
@@ -445,10 +486,15 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
     )
     
     last_error = None
+    # 對所有模型依序嘗試
     for model_name in GEMMA_MODELS:
-        max_retries = 3
+        max_retries = len(ALL_API_KEYS) * 2  # 每張 key 最多試 2 次
         for attempt in range(max_retries):
+            current_key = _pick_api_key()
+            if not current_key:
+                return None, "Error: 所有 API Key 均不可用"
             try:
+                genai.configure(api_key=current_key)
                 model = genai.GenerativeModel(model_name)
                 
                 content_list = [prompt]
@@ -477,13 +523,18 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
                     }, None
             except Exception as e:
                 last_error = str(e)
-                # If rate-limited (429) or quota exceeded, back off and retry
-                if "429" in last_error or "quota" in last_error.lower():
-                    if attempt < max_retries - 1:
-                        sleep_time = 2 * (attempt + 1)
-                        time.sleep(sleep_time)
-                        continue
-                break  # For other exceptions, immediately try the next model
+                if "429" in last_error or "quota" in last_error.lower() or "rate" in last_error.lower():
+                    # 解析 retry-after 秒數（若 Google API 有提供）
+                    retry_secs = 65  # 預設冷卻 65 秒
+                    import re
+                    m = re.search(r'retry_delay.*?seconds.*?(\d+)', last_error, re.DOTALL)
+                    if m:
+                        retry_secs = int(m.group(1)) + 2
+                    _mark_key_rate_limited(retry_secs)
+                    # 立刻再試（帶新 key）而不是 sleep
+                    continue
+                # 其他錯誤跨出儲存迴圈直接嘗試下一個模型
+                break
                 
     return None, f"All models exhausted. Last error: {last_error}"
 
@@ -1056,13 +1107,15 @@ if st.session_state.last_result:
             )
         img_url = st.session_state[img_cache_key]
 
-        col_img_area, col_txt = st.columns([1, 1.5])
-
-        with col_img_area:
-            st.markdown(
-                f'<div class="img-container"><img src="{img_url}"></div>',
-                unsafe_allow_html=True
-            )
+        if img_url:
+            col_img_area, col_txt = st.columns([1, 1.5])
+            with col_img_area:
+                st.markdown(
+                    f'<div class="img-container"><img src="{img_url}"></div>',
+                    unsafe_allow_html=True
+                )
+        else:
+            col_txt = st.container()
 
         with col_txt:
             # Item name — bold, uppercase
