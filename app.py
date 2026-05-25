@@ -339,14 +339,13 @@ def track_dislike():
 
 # 2. 核心 AI 函數
 GEMMA_MODELS = [
-    'gemma-4-26b-a4b-it',  # 預設首選：品質與速度最佳平衡
-    'gemma-4-31b-it',       # 備用：品質更高但較慢
-    'gemma-3-27b-it',       # 備用
-    'gemma-3-12b-it',       # 備用
-    'gemma-3-4b-it',        # 快速備用
-    'gemini-2.0-flash',     # 最後嘗試（免費 key 常被 rate limit）
+    'gemma-4-26b-a4b-it',  # 預設首選
+    'gemma-4-31b-it',
+    'gemma-3-27b-it',
+    'gemma-3-12b-it',
+    'gemma-3-4b-it',
 ]
-MODEL_TIMEOUT = 45  # 每個 model 最長等待秒數
+MODEL_TIMEOUT = 45
 
 def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, uploaded_image=None):
     if not api_key:
@@ -409,14 +408,33 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
         f"{specific_style_rule}\n"
         f"LANGUAGE RULE: Respond in {lang}. Use Traditional Chinese if '繁體中文'.\n"
         f"CURRENCY RULE: {currency_instruction}\n"
-        f"Reply in valid JSON only — no markdown, no extra text:\n"
-        f'{{\"critique\":\"\",\"zara_items\":[{{\"name\":\"ZARA ...\",'
-        f'\"reason\":\"\",\"category\":\"top|pants|shoes\",'
-        f'\"price_range\":\"\",\"recommended_size\":\"\"}}],'
-        f'\"other_brands\":[{{\"name\":\"\",\"reason\":\"\"}}],'
-        f'\"accessories\":[{{\"name\":\"\",\"reason\":\"\"}}],'
-        f'\"description\":\"\"}}'
-        f"\nRules: exactly 3 zara_items, 4-5 other_brands, 2 accessories.\n"
+        f"Provide response in valid JSON format ONLY:\n"
+        f"{{\n"
+        f"  \"critique\": \"(Optional) Analysis of uploaded outfit if provided, otherwise empty.\",\n"
+        f"  \"zara_items\": [\n"
+        f"    {{\n"
+        f"      \"name\": \"ZARA [Item Name]\",\n"
+        f"      \"reason\": \"Reason why this fits their physique.\",\n"
+        f"      \"category\": \"top/pants/shoes\",\n"
+        f"      \"price_range\": \"Estimated price range\",\n"
+        f"      \"recommended_size\": \"Calculated size (e.g. S, M, L, XL, EU 42) based on user's height/weight\"\n"
+        f"    }}\n"
+        f"  ],\n"
+        f"  \"other_brands\": [\n"
+        f"    {{\n"
+        f"      \"name\": \"[Brand Name] [Item Name]\",\n"
+        f"      \"reason\": \"Styling tip.\"\n"
+        f"    }}\n"
+        f"  ],\n"
+        f"  \"accessories\": [\n"
+        f"    {{\n"
+        f"      \"name\": \"[Item Name]\",\n"
+        f"      \"reason\": \"How it completes the look.\"\n"
+        f"    }}\n"
+        f"  ],\n"
+        f"  \"description\": \"A paragraph on the overall look.\"\n"
+        f"}}\n"
+        f"CRITICAL: 3 'zara_items', 4-5 'other_brands', 2 'accessories'.\n"
     )
     
     last_error = None
@@ -430,10 +448,7 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
                 img = PIL.Image.open(uploaded_image)
                 content_list.append(img)
                 
-            response = model.generate_content(
-                content_list,
-                request_options={"timeout": MODEL_TIMEOUT}
-            )
+            response = model.generate_content(content_list, request_options={"timeout": MODEL_TIMEOUT})
             text = response.text
             
             import json
