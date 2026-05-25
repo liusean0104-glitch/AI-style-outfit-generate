@@ -27,10 +27,10 @@ def get_secret(key, default=None):
 # 自動從環境變數讀取進來，存在的 key 才加入列表
 ALL_API_KEYS = [
     k for k in [
-        get_secret("GEMINI_API_KEY"),
-        get_secret("GEMINI_API_KEY_2"),
+        get_secret("GEMINI_API_KEY_2"),  # 主力 Key（Key 1 RPD 快滿，暫降為備援）
         get_secret("GEMINI_API_KEY_3"),
         get_secret("GEMINI_API_KEY_4"),
+        get_secret("GEMINI_API_KEY"),    # 原 Key 1 降為最後備援
     ] if k  # 過濾掉未設定的 None
 ]
 
@@ -73,6 +73,28 @@ def _mark_key_rate_limited(retry_seconds: int = 60):
 
 # 對外相容：舊程式碼使用單一 api_key 變數的地方仍可作用
 api_key = ALL_API_KEYS[0] if ALL_API_KEYS else None
+
+# ── 方案三：Response Cache（模組層級，跨 session 共享）──
+# 只快取「無圖、無 custom prompt」的標準請求，key = 選單組合
+import hashlib as _hashlib
+_REC_CACHE: dict = {}       # { cache_key: result_dict }
+_REC_CACHE_MAX = 200        # 最多快取幾筆（LRU 簡易版：超過就清最舊的）
+
+def _make_cache_key(gender, height, weight, season, occ, wea, sty, lang) -> str:
+    raw = f"{gender}|{height}|{weight}|{season}|{occ}|{wea}|{'_'.join(sorted(sty))}|{lang}"
+    return _hashlib.md5(raw.encode()).hexdigest()
+
+def _cache_get(key: str):
+    return _REC_CACHE.get(key)
+
+def _cache_set(key: str, value: dict):
+    global _REC_CACHE
+    if len(_REC_CACHE) >= _REC_CACHE_MAX:
+        # 刪除最舊的 20 筆
+        oldest = list(_REC_CACHE.keys())[:20]
+        for k in oldest:
+            del _REC_CACHE[k]
+    _REC_CACHE[key] = value
 sb_url = get_secret("SUPABASE_URL")
 sb_key = get_secret("SUPABASE_KEY")
 
@@ -86,6 +108,12 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 if "rec_id" not in st.session_state:
     st.session_state.rec_id = None
+# 方案三：Response Cache（模組層級，跨 session 共享）
+if "_rec_cache" not in st.session_state:
+    pass  # cache 放模組層級，不放 session_state（見下方）
+# 方案四：前端節流 — 記錄每個 session 上次生成時間
+if "_last_gen_time" not in st.session_state:
+    st.session_state["_last_gen_time"] = 0.0
 
 # 2. 注入自定義 CSS (Minimalist Luxury / ZARA Aesthetic)
 st.markdown("""
@@ -385,18 +413,11 @@ def track_dislike():
     st.toast("We'll do better next time! / 我們會繼續改進！")
 
 # 2. 核心 AI 函數
-GEMMA_MODELS = [
-    'gemini-2.5-flash',
-    'gemma-4-31b-it',
-    'gemma-4-26b-a4b-it',
-    'gemma-3-27b-it',
-]
+PRIMARY_MODEL = 'gemini-2.5-flash'
 
 def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, uploaded_image=None, custom_prompt=None):
     if not ALL_API_KEYS:
         return None, "Error: API Key missing"
-    
-    genai.configure(api_key=ALL_API_KEYS[0])
     
     sty_str = ', '.join(sty) if sty else "general"
     system_persona = (
@@ -492,57 +513,58 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
     )
     
     last_error = None
-    # 對所有模型依序嘗試
-    for model_name in GEMMA_MODELS:
-        max_retries = len(ALL_API_KEYS) * 2  # 每張 key 最多試 2 次
-        for attempt in range(max_retries):
-            current_key = _pick_api_key()
-            if not current_key:
-                return None, "Error: 所有 API Key 均不可用"
-            try:
-                genai.configure(api_key=current_key)
-                model = genai.GenerativeModel(model_name)
-                
-                content_list = [prompt]
-                if uploaded_image:
-                    import PIL.Image
-                    img = PIL.Image.open(uploaded_image)
-                    content_list.append(img)
-                    
-                response = model.generate_content(content_list)
-                text = response.text
-                
-                import json
-                clean_text = text.strip()
-                start_idx = clean_text.find('{')
-                end_idx = clean_text.rfind('}')
-                
-                if start_idx != -1 and end_idx != -1:
-                    data = json.loads(clean_text[start_idx:end_idx+1])
-                    return {
-                        "critique": data.get("critique", ""),
-                        "zara_items": data.get("zara_items", []),
-                        "other_brands": data.get("other_brands", []),
-                        "accessories": data.get("accessories", []),
-                        "description": data.get("description", ""),
-                        "model_used": model_name
-                    }, None
-            except Exception as e:
-                last_error = str(e)
-                if "429" in last_error or "quota" in last_error.lower() or "rate" in last_error.lower():
-                    # 解析 retry-after 秒數（若 Google API 有提供）
-                    retry_secs = 65  # 預設冷卻 65 秒
-                    import re
-                    m = re.search(r'retry_delay.*?seconds.*?(\d+)', last_error, re.DOTALL)
-                    if m:
-                        retry_secs = int(m.group(1)) + 2
-                    _mark_key_rate_limited(retry_secs)
-                    # 立刻再試（帶新 key）而不是 sleep
-                    continue
-                # 其他錯誤跨出儲存迴圈直接嘗試下一個模型
-                break
-                
-    return None, f"All models exhausted. Last error: {last_error}"
+    # ── 方案二：Key Rotation Fallback（同一模型，換 Key 重試）──
+    # 429/quota 時立刻換下一把 Key，全部輪過才放棄，不降階模型
+    max_retries = len(ALL_API_KEYS) * 2  # 每張 key 最多試 2 次
+    for attempt in range(max_retries):
+        current_key = _pick_api_key()
+        if not current_key:
+            return None, "Error: 所有 API Key 均不可用"
+        try:
+            genai.configure(api_key=current_key)
+            model = genai.GenerativeModel(PRIMARY_MODEL)
+
+            content_list = [prompt]
+            if uploaded_image:
+                import PIL.Image
+                img = PIL.Image.open(uploaded_image)
+                content_list.append(img)
+
+            response = model.generate_content(content_list)
+            text = response.text
+
+            import json
+            clean_text = text.strip()
+            start_idx = clean_text.find('{')
+            end_idx = clean_text.rfind('}')
+
+            if start_idx != -1 and end_idx != -1:
+                data = json.loads(clean_text[start_idx:end_idx+1])
+                return {
+                    "critique": data.get("critique", ""),
+                    "zara_items": data.get("zara_items", []),
+                    "other_brands": data.get("other_brands", []),
+                    "accessories": data.get("accessories", []),
+                    "description": data.get("description", ""),
+                    "model_used": PRIMARY_MODEL,
+                    "key_used": attempt,  # 方便 debug 知道第幾把 key 成功
+                }, None
+        except Exception as e:
+            last_error = str(e)
+            if "429" in last_error or "quota" in last_error.lower() or "rate" in last_error.lower():
+                # 解析 retry-after 秒數（若 Google API 有提供）
+                retry_secs = 65  # 預設冷卻 65 秒
+                import re
+                m = re.search(r'retry_delay.*?seconds.*?(\d+)', last_error, re.DOTALL)
+                if m:
+                    retry_secs = int(m.group(1)) + 2
+                _mark_key_rate_limited(retry_secs)
+                print(f"[KeyRotation] attempt {attempt}: 429 on key, rotating. retry_secs={retry_secs}")
+                continue  # 立刻以下一把 key 重試
+            # 非限流錯誤（網路、JSON 解析等）直接中止
+            return None, f"API Error: {last_error}"
+
+    return None, f"All keys exhausted after {max_retries} attempts. Last error: {last_error}"
 
 # Helper for base64 images
 def get_base64_image(path):
@@ -653,91 +675,127 @@ user_custom_prompt = st.text_area(t["custom_prompt_label"], placeholder=t["custo
 
 # 5. 執行按鈕
 st.markdown("<br>", unsafe_allow_html=True)
-if st.button(t["btn"]):
+
+# ── 方案四：前端節流 ── 同一 session 兩次生成需間隔 THROTTLE_SECS 秒
+THROTTLE_SECS = 15
+_now = time.time()
+_elapsed_since_last = _now - st.session_state["_last_gen_time"]
+_throttled = _elapsed_since_last < THROTTLE_SECS and st.session_state["_last_gen_time"] > 0
+_cooldown_remaining = max(0, int(THROTTLE_SECS - _elapsed_since_last))
+
+if _throttled:
+    st.button(
+        f"{t['btn']} ({_cooldown_remaining}s)",
+        disabled=True,
+        help="請稍候再試 / Please wait before generating again"
+    )
+elif st.button(t["btn"]):
+    # 記錄本次生成時間（方案四節流）
+    st.session_state["_last_gen_time"] = time.time()
+
     # 清除舊的圖片與曝光 cache，避免重新生成時殘留
     for key in list(st.session_state.keys()):
         if key.startswith("img_") or key.startswith("imp_"):
             del st.session_state[key]
 
-    # Luxury Curating UI Setup
-    TIPS = {
-        "繁體中文": [
-            "正在分析您的身形比例...",
-            "正在挑選 ZARA 季度單品...",
-            "正在優化服裝剪裁平衡...",
-            "正在注入法式簡約美學...",
-            "您的專屬時尚提案即將呈現..."
-        ],
-        "English": [
-            "Analyzing your body proportions...",
-            "Selecting seasonal ZARA pieces...",
-            "Optimizing garment cut balance...",
-            "Injecting minimalist aesthetics...",
-            "Your curated style is almost ready..."
-        ]
-    }
-    tips = TIPS[lang_select]
-    ui_placeholder = st.empty()
-    
-    import concurrent.futures
-    import time
-
-    # Show animated luxury loading UI while calling the API
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future = executor.submit(
-            get_ai_recommendation,
-            user_gender, user_height, user_weight, user_season,
-            user_occ, user_wea, user_sty, lang_select, uploaded_file,
-            user_custom_prompt
+    # ── 方案三：Cache 命中檢查（僅限無圖、無 custom prompt）──
+    _cache_key = None
+    _cached_result = None
+    _is_cacheable = not uploaded_file and not user_custom_prompt.strip()
+    if _is_cacheable:
+        _cache_key = _make_cache_key(
+            user_gender, user_height, user_weight,
+            user_season, user_occ, user_wea, user_sty, lang_select
         )
-        tip_idx = 0
-        start_time = time.time()
-        expected_seconds = 25 # Increased for multi-modal analysis and image search
-        
-        while not future.done():
-            elapsed = time.time() - start_time
-            remaining = max(1, int(expected_seconds - elapsed))
-            
-            # If it takes longer than expected, keep it at 1s or show "Processing..."
-            timer_text = f"ETA: {remaining}s" if remaining > 0 else "Finalizing..."
-            
-            with ui_placeholder.container():
-                st.markdown(f"""
-                <div class="curating-container">
-                    <div class="curating-title">Curating Your Style</div>
-                    <div class="scanning-line"></div>
-                    <div class="loading-tip">{tips[tip_idx % len(tips)]}</div>
-                    <div style="font-family: 'Inter', sans-serif; font-size: 0.7rem; letter-spacing: 3px; color: #000; margin-top: 1.5rem; font-weight: 600;">
-                        {timer_text}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-            tip_idx += 1
-            time.sleep(1.5) # Reduced sleep for smoother timer updates
-        ui_placeholder.empty()
-        result, err = future.result()
+        _cached_result = _cache_get(_cache_key)
 
-    if err:
-        st.error(f"STYLING SERVICE UNAVAILABLE: {err}")
+    if _cached_result:
+        # Cache 命中：直接顯示，不消耗任何 API quota
+        print(f"[Cache] HIT key={_cache_key}")
+        st.session_state.last_result = _cached_result
+        st.rerun()
     else:
-        result["latency_ms"] = int((time.time() - start_time) * 1000)
-        st.session_state.last_result = result
+        # Luxury Curating UI Setup
+        TIPS = {
+            "繁體中文": [
+                "正在分析您的身形比例...",
+                "正在挑選 ZARA 季度單品...",
+                "正在優化服裝剪裁平衡...",
+                "正在注入法式簡約美學...",
+                "您的專屬時尚提案即將呈現..."
+            ],
+            "English": [
+                "Analyzing your body proportions...",
+                "Selecting seasonal ZARA pieces...",
+                "Optimizing garment cut balance...",
+                "Injecting minimalist aesthetics...",
+                "Your curated style is almost ready..."
+            ]
+        }
+        tips = TIPS[lang_select]
+        ui_placeholder = st.empty()
 
-        # 依序寫入三張表
-        log_session(
-            gender=user_gender,
-            height=user_height,
-            weight=user_weight,
-            season=user_season,
-            occasion=user_occ,
-            weather=user_wea,
-            styles=user_sty,
-            language=lang_select,
-            has_photo=uploaded_file is not None,
-        )
-        rec_id = log_recommendation(result)
-        st.session_state.rec_id = rec_id
-        log_event("generate")
+        import concurrent.futures
+
+        # Show animated luxury loading UI while calling the API
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                get_ai_recommendation,
+                user_gender, user_height, user_weight, user_season,
+                user_occ, user_wea, user_sty, lang_select, uploaded_file,
+                user_custom_prompt
+            )
+            tip_idx = 0
+            start_time = time.time()
+            expected_seconds = 25  # Increased for multi-modal analysis and image search
+
+            while not future.done():
+                elapsed = time.time() - start_time
+                remaining = max(1, int(expected_seconds - elapsed))
+                timer_text = f"ETA: {remaining}s" if elapsed < expected_seconds else "Finalizing..."
+
+                with ui_placeholder.container():
+                    st.markdown(f"""
+                    <div class="curating-container">
+                        <div class="curating-title">Curating Your Style</div>
+                        <div class="scanning-line"></div>
+                        <div class="loading-tip">{tips[tip_idx % len(tips)]}</div>
+                        <div style="font-family: 'Inter', sans-serif; font-size: 0.7rem; letter-spacing: 3px; color: #000; margin-top: 1.5rem; font-weight: 600;">
+                            {timer_text}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                tip_idx += 1
+                time.sleep(1.5)
+            ui_placeholder.empty()
+            result, err = future.result()
+
+        if err:
+            st.error(f"STYLING SERVICE UNAVAILABLE: {err}")
+        else:
+            result["latency_ms"] = int((time.time() - start_time) * 1000)
+            st.session_state.last_result = result
+
+            # ── 方案三：成功後存入 cache（僅限可快取請求）──
+            if _is_cacheable and _cache_key:
+                _cache_set(_cache_key, result)
+                print(f"[Cache] SET key={_cache_key}")
+
+            # 依序寫入三張表
+            log_session(
+                gender=user_gender,
+                height=user_height,
+                weight=user_weight,
+                season=user_season,
+                occasion=user_occ,
+                weather=user_wea,
+                styles=user_sty,
+                language=lang_select,
+                has_photo=uploaded_file is not None,
+            )
+            rec_id = log_recommendation(result)
+            st.session_state.rec_id = rec_id
+            log_event("generate")
 
 # ─── Image Engine ──────────────────────────────────────────────────────────
 
