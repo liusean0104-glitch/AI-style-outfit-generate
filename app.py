@@ -339,12 +339,13 @@ def track_dislike():
 
 # 2. 核心 AI 函數
 GEMMA_MODELS = [
+    'gemini-2.5-flash',
     'gemma-4-31b-it',
     'gemma-4-26b-a4b-it',
     'gemma-3-27b-it',
 ]
 
-def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, uploaded_image=None):
+def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, uploaded_image=None, custom_prompt=None):
     if not api_key:
         return None, "Error: API Key missing"
     
@@ -398,11 +399,20 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
             f"Do NOT suggest any other main tops. Focus entirely on matching pants, shoes, and inner layers."
         )
 
+    custom_prompt_rule = ""
+    if custom_prompt:
+        custom_prompt_rule = (
+            f"SPECIAL USER REQUEST: The user has specified the following additional style instructions:\n"
+            f"\"{custom_prompt}\"\n"
+            f"Please prioritize and adapt your recommended outfits, other brands, and accessories to fulfill this request."
+        )
+
     prompt = (
         f"{system_persona}\n"
         f"User Profile: Gender: {gender}, Height: {height}cm, Weight: {weight}kg.\n"
         f"Context: Season: {season}, Occasion: {occ}, Weather: {wea}, Style: {sty_str}.\n"
         f"{specific_style_rule}\n"
+        f"{custom_prompt_rule}\n"
         f"LANGUAGE RULE: Respond in {lang}. Use Traditional Chinese if '繁體中文'.\n"
         f"CURRENCY RULE: {currency_instruction}\n"
         f"Provide response in valid JSON format ONLY:\n"
@@ -436,36 +446,44 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
     
     last_error = None
     for model_name in GEMMA_MODELS:
-        try:
-            model = genai.GenerativeModel(model_name)
-            
-            content_list = [prompt]
-            if uploaded_image:
-                import PIL.Image
-                img = PIL.Image.open(uploaded_image)
-                content_list.append(img)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                model = genai.GenerativeModel(model_name)
                 
-            response = model.generate_content(content_list)
-            text = response.text
-            
-            import json
-            clean_text = text.strip()
-            start_idx = clean_text.find('{')
-            end_idx = clean_text.rfind('}')
-            
-            if start_idx != -1 and end_idx != -1:
-                data = json.loads(clean_text[start_idx:end_idx+1])
-                return {
-                    "critique": data.get("critique", ""),
-                    "zara_items": data.get("zara_items", []),
-                    "other_brands": data.get("other_brands", []),
-                    "accessories": data.get("accessories", []),
-                    "description": data.get("description", ""),
-                    "model_used": model_name
-                }, None
-        except Exception as e:
-            last_error = str(e)
-            continue
+                content_list = [prompt]
+                if uploaded_image:
+                    import PIL.Image
+                    img = PIL.Image.open(uploaded_image)
+                    content_list.append(img)
+                    
+                response = model.generate_content(content_list)
+                text = response.text
+                
+                import json
+                clean_text = text.strip()
+                start_idx = clean_text.find('{')
+                end_idx = clean_text.rfind('}')
+                
+                if start_idx != -1 and end_idx != -1:
+                    data = json.loads(clean_text[start_idx:end_idx+1])
+                    return {
+                        "critique": data.get("critique", ""),
+                        "zara_items": data.get("zara_items", []),
+                        "other_brands": data.get("other_brands", []),
+                        "accessories": data.get("accessories", []),
+                        "description": data.get("description", ""),
+                        "model_used": model_name
+                    }, None
+            except Exception as e:
+                last_error = str(e)
+                # If rate-limited (429) or quota exceeded, back off and retry
+                if "429" in last_error or "quota" in last_error.lower():
+                    if attempt < max_retries - 1:
+                        sleep_time = 2 * (attempt + 1)
+                        time.sleep(sleep_time)
+                        continue
+                break  # For other exceptions, immediately try the next model
                 
     return None, f"All models exhausted. Last error: {last_error}"
 
@@ -506,7 +524,9 @@ with col_lang:
             "styles": ["Old Money", "Minimalist", "Streetwear", "Korean Style", "Y2K", "Padres City Connect Jersey", "Padres Home Jersey"],
             "upload_label": "Upload Your Outfit (Optional)",
             "upload_help": "We'll analyze your style and physique.",
-            "analysis_title": "AI OUTFIT ANALYSIS"
+            "analysis_title": "AI OUTFIT ANALYSIS",
+            "custom_prompt_label": "特別穿搭需求（選填）",
+            "custom_prompt_placeholder": "例如：我今天想搭配一件黑色皮衣，或是希望看起來像美式街頭風格..."
         }
     else:
         t = {
@@ -528,7 +548,9 @@ with col_lang:
             "styles": ["Old Money", "Minimalist", "Streetwear", "Korean Style", "Y2K", "Padres City Connect Jersey", "Padres Home Jersey"],
             "upload_label": "Upload Your Outfit (Optional)",
             "upload_help": "We'll analyze your style and physique.",
-            "analysis_title": "AI OUTFIT ANALYSIS"
+            "analysis_title": "AI OUTFIT ANALYSIS",
+            "custom_prompt_label": "Custom Styling Demand (Optional)",
+            "custom_prompt_placeholder": "e.g. I want to match a black leather jacket, or look like US streetwear style..."
         }
 
 with col_gen:
@@ -569,6 +591,9 @@ if uploaded_file:
     with col_mid:
         st.image(uploaded_file, caption="Current Outfit Preview", use_container_width=True)
 
+# ── Custom Prompt input ───
+user_custom_prompt = st.text_area(t["custom_prompt_label"], placeholder=t["custom_prompt_placeholder"])
+
 # 5. 執行按鈕
 st.markdown("<br>", unsafe_allow_html=True)
 if st.button(t["btn"]):
@@ -605,7 +630,8 @@ if st.button(t["btn"]):
         future = executor.submit(
             get_ai_recommendation,
             user_gender, user_height, user_weight, user_season,
-            user_occ, user_wea, user_sty, lang_select, uploaded_file
+            user_occ, user_wea, user_sty, lang_select, uploaded_file,
+            user_custom_prompt
         )
         tip_idx = 0
         start_time = time.time()
