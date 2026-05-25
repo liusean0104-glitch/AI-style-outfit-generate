@@ -34,36 +34,42 @@ ALL_API_KEYS = [
     ] if k  # 過濾掉未設定的 None
 ]
 
-# 用 session_state 記錄目前踪到哪個 key
-if "_key_idx" not in st.session_state:
-    st.session_state["_key_idx"] = 0
-if "_key_cooldown" not in st.session_state:
-    st.session_state["_key_cooldown"] = {}  # {key_idx: unix_timestamp 健到不可用}
+# ── 使用模組層級變數（threading.Lock 保護），避免在背景執行緒存取 st.session_state ──
+import threading as _threading
+_key_lock = _threading.Lock()
+_key_idx: int = 0
+_key_cooldown: dict = {}  # {key_idx: unix_timestamp 直到不可用}
 
 def _pick_api_key() -> str:
-    """回傳目前可用的 API Key。若該 Key 在冷卻中，自動转到下一個。"""
+    """回傳目前可用的 API Key。若該 Key 在冷卻中，自動轉到下一個。
+    執行緒安全：使用模組層級鎖，不依賴 st.session_state。"""
+    global _key_idx
     n = len(ALL_API_KEYS)
     if n == 0:
         return ""
     now = time.time()
-    start = st.session_state["_key_idx"]
-    for i in range(n):
-        idx = (start + i) % n
-        cooldown_until = st.session_state["_key_cooldown"].get(idx, 0)
-        if now >= cooldown_until:
-            st.session_state["_key_idx"] = idx
-            return ALL_API_KEYS[idx]
-    # 全部在冷卻中，回傳冷卻時間最短的
-    best = min(st.session_state["_key_cooldown"], key=st.session_state["_key_cooldown"].get)
-    return ALL_API_KEYS[best]
+    with _key_lock:
+        start = _key_idx
+        for i in range(n):
+            idx = (start + i) % n
+            cooldown_until = _key_cooldown.get(idx, 0)
+            if now >= cooldown_until:
+                _key_idx = idx
+                return ALL_API_KEYS[idx]
+        # 全部在冷卻中，回傳冷卻時間最短的
+        best = min(_key_cooldown, key=_key_cooldown.get)
+        return ALL_API_KEYS[best]
 
 def _mark_key_rate_limited(retry_seconds: int = 60):
-    """將目前 Key 標記為冷卻中，並輪至下一個。"""
-    idx = st.session_state["_key_idx"]
-    st.session_state["_key_cooldown"][idx] = time.time() + retry_seconds
-    next_idx = (idx + 1) % len(ALL_API_KEYS)
-    st.session_state["_key_idx"] = next_idx
-    print(f"[KeyRotation] Key #{idx} rate-limited, switching to Key #{next_idx}")
+    """將目前 Key 標記為冷卻中，並輪至下一個。
+    執行緒安全：使用模組層級鎖，不依賴 st.session_state。"""
+    global _key_idx
+    with _key_lock:
+        idx = _key_idx
+        _key_cooldown[idx] = time.time() + retry_seconds
+        next_idx = (idx + 1) % len(ALL_API_KEYS)
+        _key_idx = next_idx
+        print(f"[KeyRotation] Key #{idx} rate-limited, switching to Key #{next_idx}")
 
 # 對外相容：舊程式碼使用單一 api_key 變數的地方仍可作用
 api_key = ALL_API_KEYS[0] if ALL_API_KEYS else None
@@ -387,10 +393,10 @@ GEMMA_MODELS = [
 ]
 
 def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, uploaded_image=None, custom_prompt=None):
-    if not api_key:
+    if not ALL_API_KEYS:
         return None, "Error: API Key missing"
     
-    genai.configure(api_key=api_key)
+    genai.configure(api_key=ALL_API_KEYS[0])
     
     sty_str = ', '.join(sty) if sty else "general"
     system_persona = (
