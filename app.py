@@ -339,12 +339,14 @@ def track_dislike():
 
 # 2. 核心 AI 函數
 GEMMA_MODELS = [
-    'gemini-2.0-flash',
-    'gemma-4-31b-it',
-    'gemma-4-26b-a4b-it',
-    'gemma-3-27b-it',
-
+    'gemma-4-26b-a4b-it',  # 預設首選：品質與速度最佳平衡
+    'gemma-4-31b-it',       # 備用：品質更高但較慢
+    'gemma-3-27b-it',       # 備用
+    'gemma-3-12b-it',       # 備用
+    'gemma-3-4b-it',        # 快速備用
+    'gemini-2.0-flash',     # 最後嘗試（免費 key 常被 rate limit）
 ]
+MODEL_TIMEOUT = 45  # 每個 model 最長等待秒數
 
 def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, uploaded_image=None):
     if not api_key:
@@ -407,33 +409,14 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
         f"{specific_style_rule}\n"
         f"LANGUAGE RULE: Respond in {lang}. Use Traditional Chinese if '繁體中文'.\n"
         f"CURRENCY RULE: {currency_instruction}\n"
-        f"Provide response in valid JSON format ONLY:\n"
-        f"{{\n"
-        f"  \"critique\": \"(Optional) Analysis of uploaded outfit if provided, otherwise empty.\",\n"
-        f"  \"zara_items\": [\n"
-        f"    {{\n"
-        f"      \"name\": \"ZARA [Item Name]\",\n"
-        f"      \"reason\": \"Reason why this fits their physique.\",\n"
-        f"      \"category\": \"top/pants/shoes\",\n"
-        f"      \"price_range\": \"Estimated price range\",\n"
-        f"      \"recommended_size\": \"Calculated size (e.g. S, M, L, XL, EU 42) based on user's height/weight\"\n"
-        f"    }}\n"
-        f"  ],\n"
-        f"  \"other_brands\": [\n"
-        f"    {{\n"
-        f"      \"name\": \"[Brand Name] [Item Name]\",\n"
-        f"      \"reason\": \"Styling tip.\"\n"
-        f"    }}\n"
-        f"  ],\n"
-        f"  \"accessories\": [\n"
-        f"    {{\n"
-        f"      \"name\": \"[Item Name]\",\n"
-        f"      \"reason\": \"How it completes the look.\"\n"
-        f"    }}\n"
-        f"  ],\n"
-        f"  \"description\": \"A paragraph on the overall look.\"\n"
-        f"}}\n"
-        f"CRITICAL: 3 'zara_items', 4-5 'other_brands', 2 'accessories'.\n"
+        f"Reply in valid JSON only — no markdown, no extra text:\n"
+        f'{{\"critique\":\"\",\"zara_items\":[{{\"name\":\"ZARA ...\",'
+        f'\"reason\":\"\",\"category\":\"top|pants|shoes\",'
+        f'\"price_range\":\"\",\"recommended_size\":\"\"}}],'
+        f'\"other_brands\":[{{\"name\":\"\",\"reason\":\"\"}}],'
+        f'\"accessories\":[{{\"name\":\"\",\"reason\":\"\"}}],'
+        f'\"description\":\"\"}}'
+        f"\nRules: exactly 3 zara_items, 4-5 other_brands, 2 accessories.\n"
     )
     
     last_error = None
@@ -447,7 +430,10 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
                 img = PIL.Image.open(uploaded_image)
                 content_list.append(img)
                 
-            response = model.generate_content(content_list)
+            response = model.generate_content(
+                content_list,
+                request_options={"timeout": MODEL_TIMEOUT}
+            )
             text = response.text
             
             import json
@@ -505,7 +491,7 @@ with col_lang:
             "seasons": ["Spring", "Summer", "Autumn", "Winter"],
             "occs": ["Casual", "Business", "Date", "Gala"],
             "weas": ["Hot", "Comfortable", "Rainy", "Cold"],
-            "styles": ["Old Money", "Minimalist", "Streetwear", "Korean Style", "Y2K", "Padres City Connect Jersey", "Padres Home Jersey"],
+            "styles": ["Old Money", "City Boy", "Minimalist", "Streetwear", "Korean Style", "Y2K", "Workwear", "Japanese Casual", "Athleisure", "Vintage", "High Fashion", "Goth/Dark", "Padres City Connect Jersey", "Padres Home Jersey"],
             "upload_label": "Upload Your Outfit (Optional)",
             "upload_help": "We'll analyze your style and physique.",
             "analysis_title": "AI OUTFIT ANALYSIS"
@@ -527,7 +513,7 @@ with col_lang:
             "seasons": ["Spring", "Summer", "Autumn", "Winter"],
             "occs": ["Casual", "Business", "Date", "Gala"],
             "weas": ["Hot", "Comfortable", "Rainy", "Cold"],
-            "styles": ["Old Money", "Minimalist", "Streetwear", "Korean Style", "Y2K", "Padres City Connect Jersey", "Padres Home Jersey"],
+            "styles": ["Old Money", "City Boy", "Minimalist", "Streetwear", "Korean Style", "Y2K", "Workwear", "Japanese Casual", "Athleisure", "Vintage", "High Fashion", "Goth/Dark", "Padres City Connect Jersey", "Padres Home Jersey"],
             "upload_label": "Upload Your Outfit (Optional)",
             "upload_help": "We'll analyze your style and physique.",
             "analysis_title": "AI OUTFIT ANALYSIS"
@@ -659,218 +645,163 @@ if st.button(t["btn"]):
         log_event("generate")
 
 # ─── Image Engine ──────────────────────────────────────────────────────────
+google_api_key = get_secret("GOOGLE_API_KEY")
+google_cx      = get_secret("GOOGLE_CX")
 
-# ── RAW_DATA：服裝單品清單（URL + 屬性）────────────────────────────────────
-# 格式：{"name": str, "url": str, "gender": str, "style": str,
-#        "season": str, "occasion": str, "category": str}
-# gender / style / season / occasion 皆可為 "all" 表示萬用
-RAW_DATA = [
-    # ── Padres Special ─────────────────────────────────────────
-    {"name": "Padres Home Jersey",      "url": "https://i.postimg.cc/4xBkzZVC/home-jersey.avif",
-     "gender": "all", "style": "padres home jersey", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "Padres Jeans",            "url": "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
-     "gender": "all", "style": "padres home jersey", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "Padres Sneakers",         "url": "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
-     "gender": "all", "style": "padres home jersey", "season": "all", "occasion": "all", "category": "shoes"},
+# Fallback — Unsplash 穩定圖源（不會失效）
+URL_FALLBACK_TOPS   = "https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?w=600&q=80"
+URL_FALLBACK_PANTS  = "https://images.unsplash.com/photo-1542272604-787c3835535d?w=600&q=80"
+URL_FALLBACK_SKIRT  = "https://images.unsplash.com/photo-1583496661160-fb5218e5b0b5?w=600&q=80"
+URL_FALLBACK_SHOES  = "https://images.unsplash.com/photo-1542291026-7eec264c27ff?w=600&q=80"
+URL_FALLBACK_OTHERS = "https://images.unsplash.com/photo-1523381210434-271e8be1f52b?w=600&q=80"
 
-    {"name": "Padres City Connect Jersey", "url": "https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
-     "gender": "all", "style": "padres city connect jersey", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "Padres CC Jeans",         "url": "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
-     "gender": "all", "style": "padres city connect jersey", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "Padres CC Sneakers",      "url": "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
-     "gender": "all", "style": "padres city connect jersey", "season": "all", "occasion": "all", "category": "shoes"},
+SPECIFIC_ITEM_IMAGES = {
 
-    # ── Korean Style ───────────────────────────────────────────
-    {"name": "亞麻混紡寬版襯衫",        "url": "https://static.zara.net/assets/public/929f/7db7/8b134105881c/93f90f300c43/04391202251-e1/04391202251-e1.jpg?ts=1776675963894&w=750",
-     "gender": "all", "style": "korean style", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "西裝長褲",                "url": "https://i.postimg.cc/JzYhw827/xi-zhuang-zhang-ku.jpg",
-     "gender": "all", "style": "korean style", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "西裝外套",                "url": "https://static.zara.net/assets/public/77a3/aae9/7cdb4a779845/6bd338dda377/03548117505-e1/03548117505-e1.jpg?ts=1771492805494&w=750",
-     "gender": "all", "style": "korean style", "season": "all", "occasion": "all", "category": "others"},
-    {"name": "大衣",                    "url": "https://static.zara.net/assets/public/335a/4ba1/7fa649178479/013a090cd3e9/09330896730-e1/09330896730-e1.jpg?ts=1763624004198&w=750",
-     "gender": "all", "style": "korean style", "season": "all", "occasion": "all", "category": "others"},
-    {"name": "毛衣",                    "url": "https://static.zara.net/assets/public/47a8/0b53/66174400aeed/bc0ec06d656d/03920490704-e1/03920490704-e1.jpg?ts=1769507794726&w=750",
-     "gender": "all", "style": "korean style", "season": "all", "occasion": "all", "category": "others"},
+    # ── MAN ────────────────────────────────────────────────────
+    "linen blend oversize shirt":   "https://i.postimg.cc/Zq954QGz/kuan-song-chen-shan.jpg",
+    "linen oversize shirt":         "https://i.postimg.cc/Zq954QGz/kuan-song-chen-shan.jpg",
+    "亞麻寬鬆襯衫":                 "https://i.postimg.cc/Zq954QGz/kuan-song-chen-shan.jpg",
+    "寬鬆亞麻襯衫":                 "https://i.postimg.cc/Zq954QGz/kuan-song-chen-shan.jpg",
+    "亞麻襯衫":                     "https://i.postimg.cc/Zq954QGz/kuan-song-chen-shan.jpg",
 
-    # ── Legacy / General items (preserved from old dict) ───────
-    {"name": "linen blend oversize shirt", "url": "https://i.postimg.cc/Zq954QGz/kuan-song-chen-shan.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "man jeans",               "url": "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "white t-shirt",           "url": "https://i.postimg.cc/vZ2mRyNR/bai-se-T-Shirt.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "canvas sneaker",          "url": "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "shoes"},
-    {"name": "wide leg trouser",        "url": "https://i.postimg.cc/x1pdrQ41/kuan-xi-zhuang-zhang-ku.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "loafer",                  "url": "https://i.postimg.cc/qvD7fr5p/pi-le-fu-xie.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "shoes"},
-    {"name": "polo shirt",              "url": "https://i.postimg.cc/fRqb4sgr/polo-shan.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
+    "man jeans":                    "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
+    "男牛仔褲":                     "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
 
-    {"name": "wide leg pant",           "url": "https://i.postimg.cc/0y7qns1n/nu-kuan-ku.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "linen blend trouser",     "url": "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "sleeveless satin blouse", "url": "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "midi skirt",              "url": "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "woman jean",              "url": "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "ribbed t-shirt",          "url": "https://i.postimg.cc/766cFvdV/nu-luo-wen-duan-xiu-T-shirt.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "crop t-shirt",            "url": "https://i.postimg.cc/GhwRy2Zy/duan-ban-Tshirt.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "strappy heeled sandal",   "url": "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "shoes"},
-    {"name": "cropped linen blend shirt", "url": "https://i.postimg.cc/Qxtbn3WS/women-Cropped-Linen-Blend-Shirt.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
-]
+    "white t-shirt":                "https://i.postimg.cc/vZ2mRyNR/bai-se-T-Shirt.jpg",
+    "white tee":                    "https://i.postimg.cc/vZ2mRyNR/bai-se-T-Shirt.jpg",
+    "白色t":                        "https://i.postimg.cc/vZ2mRyNR/bai-se-T-Shirt.jpg",
+    "白t":                          "https://i.postimg.cc/vZ2mRyNR/bai-se-T-Shirt.jpg",
 
-# ── 別名表：將 AI 可能輸出的字詞對應到 RAW_DATA 的 name ─────────────────────
-_NAME_ALIASES: dict[str, str] = {
-    # 男 tops
-    "linen oversize shirt": "linen blend oversize shirt",
-    "亞麻寬鬆襯衫": "linen blend oversize shirt",
-    "寬鬆亞麻襯衫": "linen blend oversize shirt",
-    "亞麻混紡寬版襯衫": "亞麻混紡寬版襯衫",
-    # 男 pants
-    "男牛仔褲": "man jeans",
-    "西裝長褲": "西裝長褲",
-    "寬鬆西裝": "wide leg trouser",
-    "oversized suit pant": "wide leg trouser",
-    # 男 tops (white T)
-    "white tee": "white t-shirt",
-    "白色t": "white t-shirt",
-    "白色t-shirt": "white t-shirt",
-    "白t": "white t-shirt",
-    # 男 shoes
-    "白色帆布鞋": "canvas sneaker",
-    "帆布鞋": "canvas sneaker",
-    "樂福鞋": "loafer",
-    "皮質樂福鞋": "loafer",
-    # 男 tops (polo)
-    "polo衫": "polo shirt",
-    "polo 衫": "polo shirt",
-    # 女 pants
-    "女寬鬆長褲": "wide leg pant",
-    "寬鬆長褲": "wide leg pant",
-    "亞麻長褲": "linen blend trouser",
-    "linen trouser": "linen blend trouser",
-    "linen blend trousers": "linen blend trouser",
-    "低腰牛仔褲": "woman jean",
-    "低腰寬版牛仔褲": "woman jean",
-    "wide leg jean": "woman jean",
-    "low rise jean": "woman jean",
-    "女牛仔褲": "woman jean",
-    "中長裙": "midi skirt",
-    "緞面裙": "midi skirt",
-    "迷你裙": "midi skirt",
-    "denim skirt": "midi skirt",
-    "mini skirt": "midi skirt",
-    "satin skirt": "midi skirt",
-    "短裙": "midi skirt",
-    "丹寧裙": "midi skirt",
-    # 女 tops
-    "無袖緞面上衣": "sleeveless satin blouse",
-    "緞面無袖": "sleeveless satin blouse",
-    "satin blouse": "sleeveless satin blouse",
-    "螺紋t": "ribbed t-shirt",
-    "螺紋上衣": "ribbed t-shirt",
-    "ribbed tee": "ribbed t-shirt",
-    "短版t": "crop t-shirt",
-    "短版上衣": "crop t-shirt",
-    "cropped tee": "crop t-shirt",
-    "y2k t": "crop t-shirt",
-    "女寬鬆襯衫": "cropped linen blend shirt",
-    "女亞麻襯衫": "cropped linen blend shirt",
-    "cropped linen shirt": "cropped linen blend shirt",
-    # 女 shoes
-    "平底鞋": "strappy heeled sandal",
-    "涼鞋": "strappy heeled sandal",
-    "strappy sandal": "strappy heeled sandal",
-    "strappy heeled sandals": "strappy heeled sandal",
-    # Korean style
-    "西裝外套": "西裝外套",
-    "大衣": "大衣",
-    "毛衣": "毛衣",
-    # Padres
-    "padres home jersey": "Padres Home Jersey",
-    "教士隊主場球衣": "Padres Home Jersey",
-    "padres city connect jersey": "Padres City Connect Jersey",
-    "教士隊城市限定球衣": "Padres City Connect Jersey",
+    "canvas sneaker":               "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
+    "白色帆布鞋":                   "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
+    "帆布鞋":                       "https://i.postimg.cc/JzYhw82M/fan-bu-xie.jpg",
+
+    "wide leg trouser":             "https://i.postimg.cc/x1pdrQ41/kuan-xi-zhuang-zhang-ku.jpg",
+    "oversized suit pant":          "https://i.postimg.cc/x1pdrQ41/kuan-xi-zhuang-zhang-ku.jpg",
+    "寬鬆西裝":                     "https://i.postimg.cc/x1pdrQ41/kuan-xi-zhuang-zhang-ku.jpg",
+    "西裝長褲":                     "https://i.postimg.cc/JzYhw827/xi-zhuang-zhang-ku.jpg",
+
+    "loafer":                       "https://i.postimg.cc/qvD7fr5p/pi-le-fu-xie.jpg",
+    "樂福鞋":                       "https://i.postimg.cc/qvD7fr5p/pi-le-fu-xie.jpg",
+    "皮質樂福鞋":                   "https://i.postimg.cc/qvD7fr5p/pi-le-fu-xie.jpg",
+
+    "polo shirt":                   "https://i.postimg.cc/fRqb4sgr/polo-shan.jpg",
+    "polo衫":                       "https://i.postimg.cc/fRqb4sgr/polo-shan.jpg",
+    "polo 衫":                      "https://i.postimg.cc/fRqb4sgr/polo-shan.jpg",
+
+    # ── WOMAN ──────────────────────────────────────────────────
+    "wide leg pant":                "https://i.postimg.cc/0y7qns1n/nu-kuan-ku.jpg",
+    "女寬鬆長褲":                   "https://i.postimg.cc/0y7qns1n/nu-kuan-ku.jpg",
+    "寬鬆長褲":                     "https://i.postimg.cc/0y7qns1n/nu-kuan-ku.jpg",
+
+    "linen blend trouser":          "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
+    "linen trouser":                "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
+    "linen blend trousers":         "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
+    "亞麻長褲":                     "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
+
+    "sleeveless satin blouse":      "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
+    "satin blouse":                 "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
+    "無袖緞面上衣":                 "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
+    "緞面無袖":                     "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
+
+    "midi skirt":                   "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "satin skirt":                  "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "mini skirt":                   "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "denim skirt":                  "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "中長裙":                       "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "緞面裙":                       "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "迷你裙":                       "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "丹寧裙":                       "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+    "短裙":                         "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
+
+    "woman jean":                   "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
+    "女牛仔褲":                     "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
+    "低腰牛仔褲":                   "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
+    "低腰寬版牛仔褲":               "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
+    "wide leg jean":                "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
+    "low rise jean":                "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
+
+    "ribbed t-shirt":               "https://i.postimg.cc/766cFvdV/nu-luo-wen-duan-xiu-T-shirt.jpg",
+    "ribbed tee":                   "https://i.postimg.cc/766cFvdV/nu-luo-wen-duan-xiu-T-shirt.jpg",
+    "螺紋t":                        "https://i.postimg.cc/766cFvdV/nu-luo-wen-duan-xiu-T-shirt.jpg",
+    "螺紋上衣":                     "https://i.postimg.cc/766cFvdV/nu-luo-wen-duan-xiu-T-shirt.jpg",
+
+    "crop t-shirt":                 "https://i.postimg.cc/GhwRy2Zy/duan-ban-Tshirt.jpg",
+    "cropped tee":                  "https://i.postimg.cc/GhwRy2Zy/duan-ban-Tshirt.jpg",
+    "y2k t":                        "https://i.postimg.cc/GhwRy2Zy/duan-ban-Tshirt.jpg",
+    "短版t":                        "https://i.postimg.cc/GhwRy2Zy/duan-ban-Tshirt.jpg",
+    "短版上衣":                     "https://i.postimg.cc/GhwRy2Zy/duan-ban-Tshirt.jpg",
+
+    "strappy heeled sandal":        "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
+    "strappy sandal":               "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
+    "strappy heeled sandals":       "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
+    "平底鞋":                       "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
+    "涼鞋":                         "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
+
+    "cropped linen blend shirt":    "https://i.postimg.cc/Qxtbn3WS/women-Cropped-Linen-Blend-Shirt.jpg",
+    "cropped linen shirt":          "https://i.postimg.cc/Qxtbn3WS/women-Cropped-Linen-Blend-Shirt.jpg",
+    "女寬鬆襯衫":                   "https://i.postimg.cc/Qxtbn3WS/women-Cropped-Linen-Blend-Shirt.jpg",
+    "女亞麻襯衫":                   "https://i.postimg.cc/Qxtbn3WS/women-Cropped-Linen-Blend-Shirt.jpg",
+
+    # ── Padres（保留不動）───────────────────────────────────────
+    "padres city connect jersey":   "https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
+    "教士隊城市限定球衣":           "https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
+    "padres home jersey":           "https://i.postimg.cc/4xBkzZVC/home-jersey.avif",
+    "教士隊主場球衣":               "https://i.postimg.cc/4xBkzZVC/home-jersey.avif",
 }
 
-# ── 以 name 為索引的快速查詢字典 ─────────────────────────────────────────────
-_NAME_TO_URL: dict[str, str] = {item["name"].lower(): item["url"] for item in RAW_DATA}
-
-# ── COMPOSITE_DICT：以 "gender_style_season_occasion_category" 為組合鍵 ──────
-def _build_composite_dict() -> dict[str, str]:
-    """將 RAW_DATA 預處理為組合鍵字典，O(n) 初始化，O(1) 查詢。"""
-    d: dict[str, str] = {}
-    for item in RAW_DATA:
-        g  = item["gender"].lower()
-        st = item["style"].lower()
-        se = item["season"].lower()
-        oc = item["occasion"].lower()
-        ca = item["category"].lower()
-        key = f"{g}_{st}_{se}_{oc}_{ca}"
-        d[key] = item["url"]
-    return d
-
-COMPOSITE_DICT: dict[str, str] = _build_composite_dict()
-
-# ── 輔助：將 UI gender 對應到資料中的 gender 值 ──────────────────────────────
-def _normalize_gender(gender: str) -> str:
-    return "female" if gender in ("Female", "女性") else "male"
-
-
-def get_item_image(item_name: str, gender: str, category: str = "others",
-                   style: str = "all", season: str = "all", occasion: str = "all") -> str:
-    """名稱比對優先，組合鍵僅在有明確 style 時作 fallback。"""
+def get_item_image(item_name: str, gender: str, category: str = "others") -> str:
+    """回傳單張白底單品圖 URL。優先 Google CSE，失敗才 fallback。"""
     n = item_name.lower().strip()
+    g = "man" if gender in ["Male", "男性"] else "woman"
 
-    # 1. Padres 特例優先（不論 season / gender）
-    for padres_key in ("padres home jersey", "padres city connect jersey",
-                       "教士隊主場球衣", "教士隊城市限定球衣"):
-        if padres_key in n:
-            return _NAME_TO_URL.get(padres_key, "")
-
-    # 2. 名稱直接命中 _NAME_TO_URL
-    direct = _NAME_TO_URL.get(n)
-    if direct:
-        return direct
-
-    # 3. 別名表 → _NAME_TO_URL
-    canonical = _NAME_ALIASES.get(n)
-    if canonical:
-        url = _NAME_TO_URL.get(canonical.lower(), "")
-        if url:
+    # 1. 精確比對靜態圖
+    for key, url in SPECIFIC_ITEM_IMAGES.items():
+        if key in n:
             return url
 
-    # 4. 子字串模糊比對（AI 輸出常帶品牌前綴，如 "ZARA 亞麻混紡寬版襯衫"）
-    for key, url in _NAME_TO_URL.items():
-        if key in n or n in key:
-            return url
+    # 2. Google Custom Search API（白底單品圖）
+    if google_api_key and google_cx:
+        try:
+            # 用英文搜尋效果更好
+            query = f"{item_name} {g} fashion white background product"
+            params = {
+                "key": google_api_key,
+                "cx":  google_cx,
+                "q":   query,
+                "searchType": "image",
+                "imgType":    "photo",
+                "num":        5,
+                "safe":       "active",
+            }
+            r = requests.get(
+                "https://www.googleapis.com/customsearch/v1",
+                params=params,
+                timeout=5,
+            )
+            if r.ok:
+                items = r.json().get("items", [])
+                for item in items:
+                    url = item.get("link", "")
+                    if url and url.startswith("http"):
+                        return url
+        except Exception as e:
+            print(f"[Google CSE] error: {e}")
 
-    # 5. 有明確 style 時走組合鍵（Padres / Korean Style 等）
-    if style.lower() != "all":
-        g  = _normalize_gender(gender)
-        st = style.lower()
-        se = season.lower()
-        oc = occasion.lower()
-        ca = category.lower()
-        composite_key = f"{g}_{st}_{se}_{oc}_{ca}"
-        if composite_key in COMPOSITE_DICT:
-            return COMPOSITE_DICT[composite_key]
-        # 也試 gender=all
-        composite_key_all = f"all_{st}_{se}_{oc}_{ca}"
-        if composite_key_all in COMPOSITE_DICT:
-            return COMPOSITE_DICT[composite_key_all]
-
-    return ""
-
+    # 3. Fallback（依類別給不同圖）
+    top_kw   = ("shirt", "襯衫", "blouse", "top", "tee", "jacket", "coat", "外套", "上衣", "polo", "knit", "針織", "sweater")
+    pants_kw = ("pants", "trousers", "cargo", "jeans", "牛仔褲", "長褲", "寬褲", "短褲", "shorts")
+    skirt_kw = ("skirt", "裙")
+    shoes_kw = ("shoes", "sneaker", "loafer", "sandal", "boot", "鞋", "靴")
+    if any(k in n for k in top_kw) or category == "top":
+        return URL_FALLBACK_TOPS
+    if any(k in n for k in skirt_kw):
+        return URL_FALLBACK_SKIRT
+    if any(k in n for k in pants_kw) or category == "pants":
+        return URL_FALLBACK_PANTS
+    if any(k in n for k in shoes_kw):
+        return URL_FALLBACK_SHOES
+    return URL_FALLBACK_OTHERS
 
 # ─── Results Display ──────────────────────────────────────────────────────────
 if st.session_state.last_result:
@@ -931,12 +862,7 @@ if st.session_state.last_result:
         # 圖片 cache：避免每次按鈕 rerun 重新搜尋
         img_cache_key = f"img_{idx}"
         if img_cache_key not in st.session_state:
-            # 傳入第一個已選風格供組合鍵 fallback 使用
-            primary_style = user_sty[0] if user_sty else "all"
-            st.session_state[img_cache_key] = get_item_image(
-                raw_name, user_gender, category,
-                style=primary_style, season=user_season, occasion=user_occ
-            )
+            st.session_state[img_cache_key] = get_item_image(raw_name, user_gender, category)
         img_url = st.session_state[img_cache_key]
 
         col_img_area, col_txt = st.columns([1, 1.5])
