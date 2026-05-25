@@ -521,7 +521,7 @@ with col_lang:
             "seasons": ["Spring", "Summer", "Autumn", "Winter"],
             "occs": ["Casual", "Business", "Date", "Gala"],
             "weas": ["Hot", "Comfortable", "Rainy", "Cold"],
-            "styles": ["Old Money", "Minimalist", "Streetwear", "Korean Style", "Y2K", "Padres City Connect Jersey", "Padres Home Jersey"],
+            "styles": ["Old Money", "Minimalist", "Streetwear", "Korean Style", "Padres City Connect Jersey", "Padres Home Jersey"],
             "upload_label": "Upload Your Outfit (Optional)",
             "upload_help": "We'll analyze your style and physique.",
             "analysis_title": "AI OUTFIT ANALYSIS",
@@ -545,7 +545,7 @@ with col_lang:
             "seasons": ["Spring", "Summer", "Autumn", "Winter"],
             "occs": ["Casual", "Business", "Date", "Gala"],
             "weas": ["Hot", "Comfortable", "Rainy", "Cold"],
-            "styles": ["Old Money", "Minimalist", "Streetwear", "Korean Style", "Y2K", "Padres City Connect Jersey", "Padres Home Jersey"],
+            "styles": ["Old Money", "Minimalist", "Streetwear", "Korean Style", "Padres City Connect Jersey", "Padres Home Jersey"],
             "upload_label": "Upload Your Outfit (Optional)",
             "upload_help": "We'll analyze your style and physique.",
             "analysis_title": "AI OUTFIT ANALYSIS",
@@ -635,7 +635,7 @@ if st.button(t["btn"]):
         )
         tip_idx = 0
         start_time = time.time()
-        expected_seconds = 55 # Increased for multi-modal analysis and image search
+        expected_seconds = 25 # Increased for multi-modal analysis and image search
         
         while not future.done():
             elapsed = time.time() - start_time
@@ -750,6 +750,33 @@ RAW_DATA = [
      "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "shoes"},
     {"name": "cropped linen blend shirt", "url": "https://i.postimg.cc/Qxtbn3WS/women-Cropped-Linen-Blend-Shirt.jpg",
      "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
+    # ── 新增競賽用單品 ──
+    {"name": "紋理針織POLO衫", "url": "https://static.zara.net/assets/public/ea9b/6ad1/1fe04f5294ee/4550e91b144a/06771409725-e1/06771409725-e1.jpg?ts=1775027129089&w=750",
+     "gender": "male", "style": "korean style", "season": "all", "occasion": "all", "category": "tops"},
+    {"name": "亞麻混紡寬鬆短袖襯衫", "url": "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
+     "gender": "male", "style": "korean style", "season": "all", "occasion": "all", "category": "tops"},
+    {"name": "白色球鞋", "url": "https://static.zara.net/assets/public/8dd7/c670/40b047c68246/c739d76bde81/15037710002-e1/15037710002-e1.jpg?ts=1771515859118&w=1024",
+     "gender": "male", "style": "korean style", "season": "all", "occasion": "all", "category": "shoes"},
+    {"name": "印花短版上衣", "url": "https://static.zara.net/assets/public/6a57/85f0/b1de4a47998d/870944fff272/06224858016-e2/06224858016-e2.jpg?ts=1775747112321&w=750",
+     "gender": "female", "style": "streetwear", "season": "all", "occasion": "all", "category": "tops"},
+    {"name": "府綢寬鬆襯衫", "url": "https://static.zara.net/assets/public/2445/941b/a21441cca03e/6ac162b87051/01096289251-e1/01096289251-e1.jpg?ts=1771926772874&w=750",
+     "gender": "female", "style": "streetwear", "season": "all", "occasion": "all", "category": "tops"},
+    {"name": "亞麻混紡開襟短袖襯衫", "url": "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
+     "gender": "male", "style": "streetwear", "season": "all", "occasion": "all", "category": "tops"},
+    {"name": "寬鬆版印花T shirt", "url": "https://static.zara.net/assets/public/6a57/85f0/b1de4a47998d/870944fff272/06224858016-e2/06224858016-e2.jpg?ts=1775747112321&w=750",
+     "gender": "male", "style": "streetwear", "season": "all", "occasion": "all", "category": "tops"},
+    {"name": "針織POLO衫", "url": "https://static.zara.net/assets/public/ea9b/6ad1/1fe04f5294ee/4550e91b144a/06771409725-e1/06771409725-e1.jpg?ts=1775027129089&w=750",
+     "gender": "male", "style": "old money", "season": "all", "occasion": "all", "category": "tops"},
+    {"name": "亞麻混紡休閒襯衫", "url": "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
+     "gender": "male", "style": "old money", "season": "all", "occasion": "all", "category": "tops"},
+    {"name": "合身基本款棉質T shirt", "url": "https://static.zara.net/assets/public/919a/0d64/18ab4209ad1f/e0daff2808bf/02621413250-e1/02621413250-e1.jpg?ts=1774258002473&w=750",
+     "gender": "male", "style": "minimalist", "season": "all", "occasion": "all", "category": "tops"},
+    {"name": "亞麻混紡襯衫", "url": "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
+     "gender": "male", "style": "minimalist", "season": "all", "occasion": "all", "category": "tops"},
+    {"name": "亞麻混紡中長洋裝", "url": "https://static.zara.net/assets/public/98bb/0b0f/04fb4cf990bc/929e28113793/02103122104-e1/02103122104-e1.jpg?ts=1774347716612&w=750",
+     "gender": "female", "style": "minimalist", "season": "all", "occasion": "all", "category": "others"},
+    {"name": "亞麻混紡寬鬆襯衫", "url": "https://static.zara.net/assets/public/fa9e/1985/508e4ae9a96a/ca968a6a6bfa/08648023712-e1/08648023712-e1.jpg?ts=1770813038309&w=750",
+     "gender": "female", "style": "minimalist", "season": "all", "occasion": "all", "category": "tops"},
 ]
 
 # ── 別名表：將 AI 可能輸出的字詞對應到 RAW_DATA 的 name ─────────────────────
@@ -824,6 +851,33 @@ _NAME_ALIASES: dict[str, str] = {
     "教士隊主場球衣": "Padres Home Jersey",
     "padres city connect jersey": "Padres City Connect Jersey",
     "教士隊城市限定球衣": "Padres City Connect Jersey",
+    # 新增競賽用單品別名對應
+    "紋理針織polo衫": "紋理針織POLO衫",
+    "textured knit polo shirt": "紋理針織POLO衫",
+    "亞麻混紡寬鬆短袖襯衫": "亞麻混紡寬鬆短袖襯衫",
+    "loose fit linen blend short sleeve shirt": "亞麻混紡寬鬆短袖襯衫",
+    "白色球鞋": "白色球鞋",
+    "white sneakers": "白色球鞋",
+    "印花短版上衣": "印花短版上衣",
+    "printed crop top": "印花短版上衣",
+    "府綢寬鬆襯衫": "府綢寬鬆襯衫",
+    "poplin oversize shirt": "府綢寬鬆襯衫",
+    "亞麻混紡開襟短袖襯衫": "亞麻混紡開襟短袖襯衫",
+    "linen blend open collar short sleeve shirt": "亞麻混紡開襟短袖襯衫",
+    "寬鬆版印花t shirt": "寬鬆版印花T shirt",
+    "loose fit printed t-shirt": "寬鬆版印花T shirt",
+    "針織polo衫": "針織POLO衫",
+    "knit polo shirt": "針織POLO衫",
+    "亞麻混紡休閒襯衫": "亞麻混紡休閒襯衫",
+    "linen blend casual shirt": "亞麻混紡休閒襯衫",
+    "合身基本款棉質t shirt": "合身基本款棉質T shirt",
+    "slim fit basic cotton t-shirt": "合身基本款棉質T shirt",
+    "亞麻混紡襯衫": "亞麻混紡襯衫",
+    "linen blend shirt": "亞麻混紡襯衫",
+    "亞麻混紡中長洋裝": "亞麻混紡中長洋裝",
+    "linen blend midi dress": "亞麻混紡中長洋裝",
+    "亞麻混紡寬鬆襯衫": "亞麻混紡寬鬆襯衫",
+    "linen blend loose fit shirt": "亞麻混紡寬鬆襯衫",
 }
 
 # ── 以 name 為索引的快速查詢字典 ─────────────────────────────────────────────
