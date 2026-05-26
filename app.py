@@ -907,16 +907,6 @@ elif st.button(t["btn"]):
             st.session_state["builder_idx"]  = builder_idx
             st.session_state["builder_swapping"] = None
 
-            # 預先 cache 所有候補品項的圖片（共最多 9 張），換件時 instant 切換
-            primary_style = user_sty[0] if user_sty else "all"
-            for slot, opts in builder_pool.items():
-                for i, item in enumerate(opts):
-                    img_key = f"bimg_{slot}_{i}"
-                    if img_key not in st.session_state:
-                        st.session_state[img_key] = get_item_image(
-                            item.get("name",""), user_gender, slot,
-                            style=primary_style, season=user_season, occasion=user_occ
-                        )
 
             # ── 方案三：成功後存入 cache（僅限可快取請求）──
             if _is_cacheable and _cache_key:
@@ -1247,6 +1237,18 @@ def get_item_image(item_name: str, gender: str, category: str = "others",
 
 
 # ─── Results Display ──────────────────────────────────────────────────────────
+# 圖片預載：在 get_item_image 定義後才執行，換件時 instant 切換
+if st.session_state.get("builder_pool"):
+    _primary_style = user_sty[0] if user_sty else "all"
+    for _slot, _opts in st.session_state["builder_pool"].items():
+        for _i, _item in enumerate(_opts):
+            _img_key = f"bimg_{_slot}_{_i}"
+            if _img_key not in st.session_state:
+                st.session_state[_img_key] = get_item_image(
+                    _item.get("name",""), user_gender, _slot,
+                    style=_primary_style, season=user_season, occasion=user_occ
+                )
+
 if st.session_state.last_result:
     res = st.session_state.last_result
     st.markdown("---")
