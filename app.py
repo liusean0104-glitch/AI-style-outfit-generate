@@ -571,15 +571,20 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
         f"  \"pants_options\": [ {item_schema}, {item_schema}, {item_schema} ],\n"
         f"  \"shoes_options\": [ {item_schema}, {item_schema}, {item_schema} ],\n"
         f"  \"other_brands\": [\n"
-        f"    {{ \"name\": \"[Brand] [Item]\", \"reason\": \"≤12 words.\" }}\n"
+        f"    {{\n"
+        f"      \"name\": \"[Brand Name] [Item Name]\",\n"
+        f"      \"reason\": \"Styling tip.\"\n"
+        f"    }}\n"
         f"  ],\n"
         f"  \"accessories\": [\n"
-        f"    {{ \"name\": \"[Item]\", \"reason\": \"≤10 words.\" }}\n"
+        f"    {{\n"
+        f"      \"name\": \"[Item Name]\",\n"
+        f"      \"reason\": \"How it completes the look.\"\n"
+        f"    }}\n"
         f"  ],\n"
-        f"  \"description\": \"2 sentences max on the overall look.\"\n"
+        f"  \"description\": \"A paragraph on the overall look.\"\n"
         f"}}\n"
-        f"CRITICAL counts: top_options=3, pants_options=3, shoes_options=3, other_brands=4-5, accessories=2.\n"
-        f"SPEED: Keep ALL reason/description fields concise. Total response under 600 tokens.\n"
+        f"CRITICAL: top_options=3, pants_options=3, shoes_options=3, other_brands=4-5, accessories=2.\n"
     )
     
     last_error = None
@@ -1220,18 +1225,29 @@ def get_item_image(item_name: str, gender: str, category: str = "others",
                     if composite_key in COMPOSITE_DICT:
                         return COMPOSITE_DICT[composite_key]
 
-    # 6. 如果以上都失敗，使用本機預設圖檔 (base64 格式) 避免破圖
-    fallback_filename = f"{ca}.jpg"
-    if ca == "tops":
-        fallback_filename = "tops.jpg"
-    elif ca == "pants":
-        fallback_filename = "pants.jpg"
-    else:
-        fallback_filename = "others.jpg"
-    
-    local_b64 = get_local_image_data_uri(fallback_filename)
-    if local_b64:
-        return local_b64
+    # 6. 最終 fallback：按 gender × category 回傳固定 ZARA URL，永遠有圖
+    g = _normalize_gender(gender)
+    ca = category.lower()
+    slot = "top" if "top" in ca else ("pants" if "pant" in ca or "skirt" in ca else ("shoes" if "shoe" in ca else "top"))
+
+    FALLBACK_URLS = {
+        # Male
+        ("male", "top"):   "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
+        ("male", "pants"): "https://static.zara.net/assets/public/0fca/b5a0/ea5d4b3fbe4d/6d1f8a2c3e9b/02318410800-e1/02318410800-e1.jpg?ts=1771492805494&w=750",
+        ("male", "shoes"): "https://static.zara.net/assets/public/8dd7/c670/40b047c68246/c739d76bde81/15037710002-e1/15037710002-e1.jpg?ts=1771515859118&w=1024",
+        # Female
+        ("female", "top"):   "https://static.zara.net/assets/public/fa9e/1985/508e4ae9a96a/ca968a6a6bfa/08648023712-e1/08648023712-e1.jpg?ts=1770813038309&w=750",
+        ("female", "pants"): "https://static.zara.net/assets/public/98bb/0b0f/04fb4cf990bc/929e28113793/02103122104-e1/02103122104-e1.jpg?ts=1774347716612&w=750",
+        ("female", "shoes"): "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
+        # Other / unknown → male fallbacks
+        ("other", "top"):   "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
+        ("other", "pants"): "https://static.zara.net/assets/public/0fca/b5a0/ea5d4b3fbe4d/6d1f8a2c3e9b/02318410800-e1/02318410800-e1.jpg?ts=1771492805494&w=750",
+        ("other", "shoes"): "https://static.zara.net/assets/public/8dd7/c670/40b047c68246/c739d76bde81/15037710002-e1/15037710002-e1.jpg?ts=1771515859118&w=1024",
+    }
+
+    url = FALLBACK_URLS.get((g, slot)) or FALLBACK_URLS.get(("male", slot), "")
+    if url:
+        return url
 
     return ""
 
