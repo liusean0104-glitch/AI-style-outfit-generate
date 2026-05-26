@@ -51,7 +51,7 @@ html, body, [data-testid="stApp"] { background:#fff; color:#111; }
     border-top:1px solid #f0f0f0; padding-top:1.5rem;
 }
 .kpi-grid {
-    display:grid; grid-template-columns:repeat(5,1fr);
+    display:grid; grid-template-columns:repeat(7,1fr);
     gap:1px; background:#111; border:1px solid #111; margin-bottom:2.5rem;
 }
 .kpi-card { background:#fff; padding:1.5rem 1.2rem 1.2rem; }
@@ -219,8 +219,23 @@ total_sessions  = len(sessions)
 total_recs      = len(recs)
 total_likes     = len([e for e in events if e["event_type"] == "like"])
 total_dislikes  = len([e for e in events if e["event_type"] == "dislike"])
-total_discovers = len(disc_events)
-total_feedback  = total_likes + total_dislikes
+total_discovers   = len(disc_events)
+total_feedback    = total_likes + total_dislikes
+
+# Pro 付費意願數據
+pro_intent_events = [e for e in events if e["event_type"] == "pro_intent_click"]
+waitlist_events   = [e for e in events if e["event_type"] == "waitlist_signup"]
+total_pro_clicks  = len(pro_intent_events)
+total_waitlist    = len(waitlist_events)
+pro_to_waitlist   = round(total_waitlist / total_pro_clicks * 100) if total_pro_clicks else 0
+
+# Pro 付費意願數據
+pro_intent_events = [e for e in events if e["event_type"] == "pro_intent_click"]
+waitlist_events   = [e for e in events if e["event_type"] == "waitlist_signup"]
+total_pro_clicks  = len(pro_intent_events)
+total_waitlist    = len(waitlist_events)
+# 點了 Pro 按鈕後留下 email 的轉換率
+pro_to_waitlist   = round(total_waitlist / total_pro_clicks * 100) if total_pro_clicks else 0
 
 photo_count  = sum(1 for s in sessions if s.get("has_photo_upload"))
 photo_rate   = round(photo_count / total_sessions * 100) if total_sessions else 0
@@ -278,6 +293,16 @@ st.markdown(f"""
     <div class="kpi-label">Satisfaction</div>
     <div class="kpi-value">{satisfaction}%</div>
     <span class="kpi-delta neu">有回饋者中 Like 率</span>
+  </div>
+  <div class="kpi-card" style="border-left:3px solid #111;">
+    <div class="kpi-label">✨ Pro Clicks</div>
+    <div class="kpi-value">{total_pro_clicks}</div>
+    <span class="kpi-delta neu">付費意願人數</span>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Waitlist Signups</div>
+    <div class="kpi-value">{total_waitlist}</div>
+    <span class="kpi-delta {'up' if total_waitlist > 0 else 'neu'}">→ {pro_to_waitlist}% 轉換</span>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -351,11 +376,13 @@ sessions_with_discover = len(set(e["session_id"] for e in disc_events))
 sessions_with_feedback = len(like_sessions | dislike_sessions)
 
 funnel_steps = [
-    ("SESSION STARTED",     total_sessions,           total_sessions, "#111"),
-    ("GENERATED ≥1 OUTFIT", sessions_with_rec,         total_sessions, "#111"),
-    ("CLICKED DISCOVER",    sessions_with_discover,    total_sessions, "#555"),
-    ("LEFT FEEDBACK",       sessions_with_feedback,    total_sessions, "#888"),
-    ("LIKED RESULT",        len(like_sessions),        total_sessions, "#bbb"),
+    ("SESSION STARTED",        total_sessions,        total_sessions, "#111"),
+    ("GENERATED ≥1 OUTFIT",    sessions_with_rec,     total_sessions, "#111"),
+    ("CLICKED DISCOVER",       sessions_with_discover,total_sessions, "#555"),
+    ("LEFT FEEDBACK",          sessions_with_feedback, total_sessions, "#888"),
+    ("LIKED RESULT",           len(like_sessions),    total_sessions, "#bbb"),
+    ("✨ CLICKED PRO FEATURE", total_pro_clicks,       total_sessions, "#3b82f6"),
+    ("📧 WAITLIST SIGNUP",     total_waitlist,         total_sessions, "#16a34a"),
 ]
 funnel_html = ""
 for label, count, base, color in funnel_steps:
@@ -369,13 +396,15 @@ for label, count, base, color in funnel_steps:
     </div>"""
 st.markdown(funnel_html, unsafe_allow_html=True)
 
-col_i1, col_i2 = st.columns(2)
+col_i1, col_i2, col_i3 = st.columns(3)
 with col_i1:
     gen_rate  = round(sessions_with_rec / total_sessions * 100) if total_sessions else 0
     st.markdown(f'<div class="insight-box">生成轉換率 <b>{gen_rate}%</b>：每 100 個進入 App 的用戶中，有 {gen_rate} 個完成至少一次生成。</div>', unsafe_allow_html=True)
 with col_i2:
     disc_rate = round(sessions_with_discover / sessions_with_rec * 100) if sessions_with_rec else 0
     st.markdown(f'<div class="insight-box">Discover 點擊率 <b>{disc_rate}%</b>：完成生成的用戶中，有 {disc_rate}% 點擊了 ZARA 商品連結，代表實際購物意圖。</div>', unsafe_allow_html=True)
+with col_i3:
+    st.markdown(f'<div class="insight-box">✨ Pro 付費意願：<b>{total_pro_clicks}</b> 人點擊 Pro 功能，其中 <b>{total_waitlist}</b> 人留下 email，轉換率 <b>{pro_to_waitlist}%</b>。這是最直接的付費意願指標。</div>', unsafe_allow_html=True)
 
 # ── SECTION 4：AI Model 表現（從 model_performance Supabase view）──
 st.markdown('<div class="section-label">AI Model Performance</div>', unsafe_allow_html=True)
@@ -500,7 +529,7 @@ launch_date = str(all_session_dates[0]) if all_session_dates else "—"
 rec_per_session = round(total_recs / total_sessions, 1) if total_sessions else 0
 
 st.markdown(f"""
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#111;border:1px solid #111;margin-bottom:1rem;">
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1px;background:#111;border:1px solid #111;margin-bottom:1rem;">
   <div style="background:#fff;padding:1.2rem;">
     <div style="font-family:'DM Mono',monospace;font-size:0.58rem;letter-spacing:3px;color:#999;text-transform:uppercase;margin-bottom:0.5rem;">Prototype Live Since</div>
     <div style="font-family:'Bodoni Moda',serif;font-size:1.3rem;">{launch_date}</div>
@@ -517,6 +546,16 @@ st.markdown(f"""
     <div style="font-family:'DM Mono',monospace;font-size:0.58rem;letter-spacing:3px;color:#999;text-transform:uppercase;margin-bottom:0.5rem;">Photo Upload Rate（深度使用）</div>
     <div style="font-family:'Bodoni Moda',serif;font-size:1.3rem;">{photo_rate}%</div>
   </div>
+  <div style="background:#fff;padding:1.2rem;border-top:3px solid #3b82f6;">
+    <div style="font-family:'DM Mono',monospace;font-size:0.58rem;letter-spacing:3px;color:#3b82f6;text-transform:uppercase;margin-bottom:0.5rem;">✨ Pro Feature Clicks</div>
+    <div style="font-family:'Bodoni Moda',serif;font-size:1.3rem;">{total_pro_clicks}</div>
+    <div style="font-family:'DM Mono',monospace;font-size:0.58rem;color:#aaa;margin-top:0.3rem;">付費意願人數</div>
+  </div>
+  <div style="background:#fff;padding:1.2rem;border-top:3px solid #16a34a;">
+    <div style="font-family:'DM Mono',monospace;font-size:0.58rem;letter-spacing:3px;color:#16a34a;text-transform:uppercase;margin-bottom:0.5rem;">📧 Waitlist Signups</div>
+    <div style="font-family:'Bodoni Moda',serif;font-size:1.3rem;">{total_waitlist}</div>
+    <div style="font-family:'DM Mono',monospace;font-size:0.58rem;color:#aaa;margin-top:0.3rem;">Pro→Email 轉換 {pro_to_waitlist}%</div>
+  </div>
 </div>
 <div class="insight-box">
   <b>競賽報告 Key Numbers：</b>
@@ -525,6 +564,9 @@ st.markdown(f"""
   用戶對推薦結果的 ZARA 商品點擊率達 <b>{disc_rate}%</b>，
   顯示產品具備驅動實際購物行為的能力。有 <b>{photo_rate}%</b> 的用戶主動上傳穿搭照片使用進階功能，
   代表核心功能的深度採用率。
+  此外，<b>{total_pro_clicks} 位用戶</b>點擊了 Pro 付費功能按鈕，
+  其中 <b>{total_waitlist} 位</b>留下 email 加入候補名單（轉換率 <b>{pro_to_waitlist}%</b>），
+  證明產品具備獲取付費用戶的市場吸引力。
 </div>
 """, unsafe_allow_html=True)
 
