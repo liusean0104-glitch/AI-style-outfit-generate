@@ -555,33 +555,6 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
     currency_instruction = "Estimate price in NTD (TWD) for 繁體中文, or USD for English."
     
     specific_style_rule = ""
-    if lang == "繁體中文":
-        p_cc_name = "教士隊城市限定球衣"
-        p_cc_reason = "這套穿搭的核心單品。"
-        p_home_name = "教士隊主場球衣"
-        p_home_reason = "這套穿搭的核心單品。"
-        p_price = "球隊商店限定"
-    else:
-        p_cc_name = "Padres City Connect Jersey"
-        p_cc_reason = "The center piece of this outfit."
-        p_home_name = "Padres Home Jersey"
-        p_home_reason = "The center piece of this outfit."
-        p_price = "Team Store Exclusive"
-
-    if "Padres City Connect Jersey" in sty:
-        specific_style_rule = (
-            f"SPECIAL STYLE RULE: The user IS wearing a '{p_cc_name}' as the main top. "
-            f"In your JSON response, the first item in 'zara_items' MUST be exactly: "
-            f"{{\"name\": \"{p_cc_name}\", \"reason\": \"{p_cc_reason}\", \"category\": \"top\", \"price_range\": \"{p_price}\", \"recommended_size\": \"L\"}}. "
-            f"Do NOT suggest any other main tops. Focus entirely on matching pants, shoes, and inner layers."
-        )
-    elif "Padres Home Jersey" in sty:
-        specific_style_rule = (
-            f"SPECIAL STYLE RULE: The user IS wearing a '{p_home_name}' as the main top. "
-            f"In your JSON response, the first item in 'zara_items' MUST be exactly: "
-            f"{{\"name\": \"{p_home_name}\", \"reason\": \"{p_home_reason}\", \"category\": \"top\", \"price_range\": \"{p_price}\", \"recommended_size\": \"L\"}}. "
-            f"Do NOT suggest any other main tops. Focus entirely on matching pants, shoes, and inner layers."
-        )
 
     custom_prompt_rule = ""
     if custom_prompt:
@@ -769,7 +742,7 @@ with col_lang:
             "seasons": ["Spring", "Summer", "Autumn", "Winter"],
             "occs": ["Casual", "Business", "Date", "Gala"],
             "weas": ["Hot", "Comfortable", "Rainy", "Cold"],
-            "styles": ["Old Money", "Minimalist", "Streetwear", "Korean Style", "Padres City Connect Jersey", "Padres Home Jersey"],
+            "styles": ["Old Money", "Minimalist", "Streetwear", "Korean Style", "City Boy", "Japanese Casual", "Vintage", "Y2K"],
             "upload_label": "Upload Your Outfit (Optional)",
             "upload_help": "We'll analyze your style and physique.",
             "analysis_title": "AI OUTFIT ANALYSIS",
@@ -793,7 +766,7 @@ with col_lang:
             "seasons": ["Spring", "Summer", "Autumn", "Winter"],
             "occs": ["Casual", "Business", "Date", "Gala"],
             "weas": ["Hot", "Comfortable", "Rainy", "Cold"],
-            "styles": ["Old Money", "Minimalist", "Streetwear", "Korean Style", "Padres City Connect Jersey", "Padres Home Jersey"],
+            "styles": ["Old Money", "Minimalist", "Streetwear", "Korean Style", "City Boy", "Japanese Casual", "Vintage", "Y2K"],
             "upload_label": "Upload Your Outfit (Optional)",
             "upload_help": "We'll analyze your style and physique.",
             "analysis_title": "AI OUTFIT ANALYSIS",
@@ -986,21 +959,6 @@ elif st.button(t["btn"]):
 #        "season": str, "occasion": str, "category": str}
 # gender / style / season / occasion 皆可為 "all" 表示萬用
 RAW_DATA = [
-    # ── Padres Special ─────────────────────────────────────────
-    {"name": "Padres Home Jersey",      "url": "https://i.postimg.cc/4xBkzZVC/home-jersey.avif",
-     "gender": "all", "style": "padres home jersey", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "Padres Jeans",            "url": "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
-     "gender": "all", "style": "padres home jersey", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "Padres Sneakers",         "url": "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
-     "gender": "all", "style": "padres home jersey", "season": "all", "occasion": "all", "category": "shoes"},
-
-    {"name": "Padres City Connect Jersey", "url": "https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
-     "gender": "all", "style": "padres city connect jersey", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "Padres CC Jeans",         "url": "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
-     "gender": "all", "style": "padres city connect jersey", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "Padres CC Sneakers",      "url": "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
-     "gender": "all", "style": "padres city connect jersey", "season": "all", "occasion": "all", "category": "shoes"},
-
     # ── Korean Style ───────────────────────────────────────────
     {"name": "亞麻混紡寬版襯衫",        "url": "https://static.zara.net/assets/public/929f/7db7/8b134105881c/93f90f300c43/04391202251-e1/04391202251-e1.jpg?ts=1776675963894&w=750",
      "gender": "all", "style": "korean style", "season": "all", "occasion": "all", "category": "tops"},
@@ -1143,11 +1101,7 @@ _NAME_ALIASES: dict[str, str] = {
     "西裝外套": "西裝外套",
     "大衣": "大衣",
     "毛衣": "毛衣",
-    # Padres
-    "padres home jersey": "Padres Home Jersey",
-    "教士隊主場球衣": "Padres Home Jersey",
-    "padres city connect jersey": "Padres City Connect Jersey",
-    "教士隊城市限定球衣": "Padres City Connect Jersey",
+
     # 新增競賽用單品別名對應
     "紋理針織polo衫": "紋理針織POLO衫",
     "textured knit polo shirt": "紋理針織POLO衫",
@@ -1227,15 +1181,7 @@ def get_item_image(item_name: str, gender: str, category: str = "others",
     if cached:
         return cached
 
-    # 1. Padres 特例優先（不論 season / gender）
-    for padres_key in ("padres home jersey", "padres city connect jersey",
-                       "教士隊主場球衣", "教士隊城市限定球衣"):
-        if padres_key in n:
-            url = _NAME_TO_URL.get(padres_key, "")
-            if url: _sb_img_set(n, url, gender)
-            return url
-
-    # 2. 名稱直接命中 _NAME_TO_URL
+    # 1. 名稱直接命中 _NAME_TO_URL
     direct = _NAME_TO_URL.get(n)
     if direct:
         _sb_img_set(n, direct, gender)
@@ -1321,25 +1267,27 @@ def get_item_image(item_name: str, gender: str, category: str = "others",
 
     pool = FALLBACK_POOL.get((g, slot)) or FALLBACK_POOL.get(("male", slot), [])
     if pool:
-        # 用 item_name 的 hash 決定取哪一張，同名稱永遠對應同一張，不同名稱大機率不同張
-        pick = abs(hash(item_name)) % len(pool)
+        # 用 item_name 長度 + 首字元 ord 做穩定 pick（不依賴 hash()，Streamlit rerun 間一致）
+        name_key = item_name.strip()
+        stable_val = len(name_key) + (ord(name_key[0]) if name_key else 0)
+        pick = stable_val % len(pool)
         return pool[pick]
 
     return ""
 
 
 # ─── Results Display ──────────────────────────────────────────────────────────
-# 圖片預載：在 get_item_image 定義後才執行，換件時 instant 切換
+# 圖片預載：在 get_item_image 定義後才執行，每次生成後強制更新所有 9 張
 if st.session_state.get("builder_pool"):
     _primary_style = user_sty[0] if user_sty else "all"
     for _slot, _opts in st.session_state["builder_pool"].items():
         for _i, _item in enumerate(_opts):
             _img_key = f"bimg_{_slot}_{_i}"
-            if _img_key not in st.session_state:
-                st.session_state[_img_key] = get_item_image(
-                    _item.get("name",""), user_gender, _slot,
-                    style=_primary_style, season=user_season, occasion=user_occ
-                )
+            # 永遠重新載入（確保換件後每個 index 對應到不同圖片）
+            st.session_state[_img_key] = get_item_image(
+                _item.get("name",""), user_gender, _slot,
+                style=_primary_style, season=user_season, occasion=user_occ
+            )
 
 if st.session_state.last_result:
     res = st.session_state.last_result
@@ -1442,8 +1390,8 @@ if st.session_state.last_result:
                 f'color:#555; line-height:1.7; margin-bottom:1.5rem;">{reason}</div>',
                 unsafe_allow_html=True
             )
-            # ZARA gender-aware Discover button (skip for Padres jerseys)
-            if "Padres" not in name_brand and "教士隊" not in name_brand:
+            # ZARA gender-aware Discover button
+            if True:  # Discover button always shown
                 search_query = urllib.parse.quote(name_brand)
                 section  = "MAN" if user_gender in ["Male", "男性"] else "WOMAN"
                 zara_url = f"https://www.zara.com/tw/zt/search?searchTerm={search_query}&section={section}"
