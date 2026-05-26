@@ -571,3 +571,107 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.markdown("<br><br>", unsafe_allow_html=True)
+# ── SECTION 8：API Key Quota Monitor ──
+st.markdown('<div class="section-label">API Key Quota Monitor</div>', unsafe_allow_html=True)
+
+MODEL_TIERS_DISPLAY = [
+    {"name": "gemini-3.5-flash",      "rpd": 20,  "soft": 18, "color": "#111"},
+    {"name": "gemini-2.5-flash",      "rpd": 20,  "soft": 18, "color": "#555"},
+    {"name": "gemini-3.1-flash-lite", "rpd": 500, "soft": 480, "color": "#888"},
+]
+KEY_LABELS = ["Key 3 (主力)", "Key 4", "Key 2", "Key 1 (備援)"]
+
+# 先嘗試從 Supabase key_quota 表讀今日資料
+@st.cache_data(ttl=30)  # 30 秒更新一次
+def load_quota():
+    import datetime, zoneinfo
+    try:
+        pt = zoneinfo.ZoneInfo("America/Los_Angeles")
+        today = datetime.datetime.now(pt).strftime("%Y-%m-%d")
+    except Exception:
+        today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+    url = f"{sb_url}/rest/v1/key_quota?date=eq.{today}"
+    headers = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
+    try:
+        r = requests.get(url, headers=headers, timeout=4)
+        if r.ok:
+            rows = r.json()
+            # {(key_idx, model_name): count}
+            return {(row["key_idx"], row["model_name"]): row["count"] for row in rows}
+    except Exception:
+        pass
+    return {}
+
+quota_data = load_quota()
+has_quota_data = bool(quota_data)
+
+if not has_quota_data:
+    st.markdown(
+        '<div class="insight-box" style="border-left-color:#f59e0b;">'
+        '⚠️ <b>key_quota 表尚無今日資料。</b>'
+        '請確認 Supabase 已建立 key_quota 表，且 App 今日有生成請求。'
+        '（建立 SQL：<code>CREATE TABLE key_quota (key_idx int, model_name text, date text, count int, PRIMARY KEY (key_idx, model_name, date));</code>）'
+        '</div>',
+        unsafe_allow_html=True
+    )
+
+# 無論有無 Supabase 資料都顯示表格（有資料就顯示，沒有就全部顯示 0）
+for tier in MODEL_TIERS_DISPLAY:
+    model_name = tier["name"]
+    rpd        = tier["rpd"]
+    soft       = tier["soft"]
+    color      = tier["color"]
+
+    st.markdown(
+        f'<p style="font-family:DM Mono,monospace;font-size:0.62rem;letter-spacing:3px;'
+        f'color:{color};text-transform:uppercase;margin-top:1.2rem;margin-bottom:0.6rem;">'
+        f'▸ {model_name} &nbsp;·&nbsp; RPD {rpd} &nbsp;·&nbsp; Soft Limit {soft}</p>',
+        unsafe_allow_html=True
+    )
+
+    cols = st.columns(4)
+    for i, label in enumerate(KEY_LABELS):
+        count = quota_data.get((i, model_name), 0)
+        remaining = max(0, soft - count)
+        pct = round(count / soft * 100) if soft else 0
+
+        # 狀態顏色
+        if count >= soft:
+            bar_color = "#dc2626"   # 紅：已達軟限
+            status    = "SOFT LIMIT"
+            status_color = "#dc2626"
+        elif pct >= 70:
+            bar_color = "#f59e0b"   # 橘：接近
+            status    = f"{remaining} left"
+            status_color = "#f59e0b"
+        else:
+            bar_color = "#111"
+            status    = f"{remaining} left"
+            status_color = "#16a34a"
+
+        with cols[i]:
+            st.markdown(f"""
+            <div style="border:1px solid #eee;padding:0.8rem;margin-bottom:0.3rem;">
+              <div style="font-family:'DM Mono',monospace;font-size:0.58rem;letter-spacing:2px;
+                          color:#999;text-transform:uppercase;margin-bottom:0.4rem;">{label}</div>
+              <div style="font-family:'Bodoni Moda',serif;font-size:1.6rem;line-height:1;">{count}</div>
+              <div style="font-family:'DM Mono',monospace;font-size:0.55rem;
+                          color:{status_color};margin-top:0.2rem;margin-bottom:0.5rem;">{status}</div>
+              <div style="background:#f5f5f5;height:6px;border-radius:3px;">
+                <div style="background:{bar_color};height:6px;border-radius:3px;
+                            width:{min(pct,100)}%;transition:width 0.4s;"></div>
+              </div>
+              <div style="font-family:'DM Mono',monospace;font-size:0.5rem;
+                          color:#ccc;margin-top:0.3rem;text-align:right;">{pct}% used</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+st.markdown(
+    "<div style=\"font-family:DM Mono,monospace;font-size:0.58rem;letter-spacing:2px;"
+    "color:#aaa;\">* 數據每 30 秒自動更新 · 重啟後歸零（持久化需 key_quota 表）"
+    " · PT 午夜自動重置</div>",
+    unsafe_allow_html=True
+)
+
