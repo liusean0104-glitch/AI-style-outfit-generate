@@ -23,56 +23,117 @@ def get_secret(key, default=None):
         pass
     return os.getenv(key, default)
 
-# ── 多組 API Key 輪詢（Round-Robin + Quota-Aware Key Rotation）──
-# 自動從環境變數讀取進來，存在的 key 才加入列表
+# ── API Key 列表（KEY_3 優先，KEY_1 備援）──
 ALL_API_KEYS = [
     k for k in [
-        get_secret("GEMINI_API_KEY_2"),  # 主力 Key（Key 1 RPD 快滿，暫降為備援）
-        get_secret("GEMINI_API_KEY_3"),
+        get_secret("GEMINI_API_KEY_3"),  # 主力 Key
         get_secret("GEMINI_API_KEY_4"),
+        get_secret("GEMINI_API_KEY_2"),
         get_secret("GEMINI_API_KEY"),    # 原 Key 1 降為最後備援
-    ] if k  # 過濾掉未設定的 None
+    ] if k
 ]
 
-# ── 使用模組層級變數（threading.Lock 保護），避免在背景執行緒存取 st.session_state ──
-import threading as _threading
-_key_lock = _threading.Lock()
-_key_idx: int = 0
-_key_cooldown: dict = {}  # {key_idx: unix_timestamp 直到不可用}
+# ── 模型優先序 + RPD Soft Limit（達到閾值主動換 Key，不等 429）──
+MODEL_TIERS = [
+    # 第一優先：Gemini 3.5 Flash（RPD=20，留 2 緩衝）
+    {"name": "gemini-3.5-flash",      "rpd_soft_limit": 18},
+    # 第二：Gemini 2.5 Flash（RPD=20，留 2 緩衝）
+    {"name": "gemini-2.5-flash",      "rpd_soft_limit": 18},
+    # 最終備援：Gemini 3.1 Flash Lite（RPD=500，留 20 緩衝）品質略低但額度充裕
+    {"name": "gemini-3.1-flash-lite", "rpd_soft_limit": 480},
+]
 
-def _pick_api_key() -> str:
-    """回傳目前可用的 API Key。若該 Key 在冷卻中，自動轉到下一個。
-    執行緒安全：使用模組層級鎖，不依賴 st.session_state。"""
-    global _key_idx
+import threading as _threading
+import datetime as _datetime
+
+_key_lock = _threading.Lock()
+_key_cooldown: dict = {}
+_daily_count: dict = {}
+_daily_date: dict = {}
+
+def _today_pt() -> str:
+    import datetime, zoneinfo
+    try:
+        pt = zoneinfo.ZoneInfo("America/Los_Angeles")
+        return datetime.datetime.now(pt).strftime("%Y-%m-%d")
+    except Exception:
+        return _datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+def _get_daily_count(key_idx: int, model_name: str) -> int:
+    k = (key_idx, model_name)
+    today = _today_pt()
+    if _daily_date.get(k) != today:
+        _daily_count[k] = 0
+        _daily_date[k] = today
+    return _daily_count.get(k, 0)
+
+def _inc_daily_count(key_idx: int, model_name: str):
+    k = (key_idx, model_name)
+    today = _today_pt()
+    if _daily_date.get(k) != today:
+        _daily_count[k] = 0
+        _daily_date[k] = today
+    _daily_count[k] = _daily_count.get(k, 0) + 1
+    print(f"[Quota] Key#{key_idx} {model_name} today={_daily_count[k]}")
+
+def _pick_key_for_model(model_name: str, rpd_soft_limit: int):
     n = len(ALL_API_KEYS)
     if n == 0:
-        return ""
+        return None, None
     now = time.time()
     with _key_lock:
-        start = _key_idx
-        for i in range(n):
-            idx = (start + i) % n
-            cooldown_until = _key_cooldown.get(idx, 0)
-            if now >= cooldown_until:
-                _key_idx = idx
-                return ALL_API_KEYS[idx]
-        # 全部在冷卻中，回傳冷卻時間最短的
-        best = min(_key_cooldown, key=_key_cooldown.get)
-        return ALL_API_KEYS[best]
+        for idx in range(n):
+            if now < _key_cooldown.get(idx, 0):
+                continue
+            if _get_daily_count(idx, model_name) >= rpd_soft_limit:
+                continue
+            return idx, ALL_API_KEYS[idx]
+    return None, None
 
-def _mark_key_rate_limited(retry_seconds: int = 60):
-    """將目前 Key 標記為冷卻中，並輪至下一個。
-    執行緒安全：使用模組層級鎖，不依賴 st.session_state。"""
-    global _key_idx
+def _mark_key_rpm_limited(key_idx: int, retry_seconds: int = 65):
     with _key_lock:
-        idx = _key_idx
-        _key_cooldown[idx] = time.time() + retry_seconds
-        next_idx = (idx + 1) % len(ALL_API_KEYS)
-        _key_idx = next_idx
-        print(f"[KeyRotation] Key #{idx} rate-limited, switching to Key #{next_idx}")
+        _key_cooldown[key_idx] = time.time() + retry_seconds
+        print(f"[KeyRotation] Key#{key_idx} RPM-limited for {retry_seconds}s")
 
-# 對外相容：舊程式碼使用單一 api_key 變數的地方仍可作用
+# 對外相容
 api_key = ALL_API_KEYS[0] if ALL_API_KEYS else None
+
+# ── Supabase Quota 持久化（啟動時還原今日計數，重啟不失憶）──
+def _sb_quota_restore():
+    """從 Supabase key_quota 表讀回今日計數，避免 Streamlit 重啟後歸零。"""
+    if not sb_url or not sb_key:
+        return
+    today = _today_pt()
+    url = f"{sb_url}/rest/v1/key_quota?date=eq.{today}"
+    headers = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
+    try:
+        r = requests.get(url, headers=headers, timeout=3)
+        if r.ok:
+            for row in r.json():
+                k = (row["key_idx"], row["model_name"])
+                _daily_count[k] = row["count"]
+                _daily_date[k] = today
+            print(f"[Quota] Restored {len(r.json())} quota rows from Supabase")
+    except Exception as e:
+        print(f"[Quota] restore failed: {e}")
+
+def _sb_quota_upsert(key_idx: int, model_name: str, count: int):
+    """把最新計數寫回 Supabase key_quota 表（upsert）。"""
+    if not sb_url or not sb_key:
+        return
+    today = _today_pt()
+    url = f"{sb_url}/rest/v1/key_quota"
+    headers = {
+        "apikey": sb_key,
+        "Authorization": f"Bearer {sb_key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+    payload = {"key_idx": key_idx, "model_name": model_name, "date": today, "count": count}
+    try:
+        requests.post(url, headers=headers, json=payload, timeout=2)
+    except Exception as e:
+        print(f"[Quota] upsert failed: {e}")
 
 # ── 方案三：Response Cache（模組層級，跨 session 共享）──
 # 只快取「無圖、無 custom prompt」的標準請求，key = 選單組合
@@ -97,6 +158,7 @@ def _cache_set(key: str, value: dict):
     _REC_CACHE[key] = value
 sb_url = get_secret("SUPABASE_URL")
 sb_key = get_secret("SUPABASE_KEY")
+_sb_quota_restore()  # 啟動時從 Supabase 還原今日 Key×Model 計數
 
 st.set_page_config(page_title="AI Stylist", page_icon="👗", layout="centered")
 
@@ -413,7 +475,7 @@ def track_dislike():
     st.toast("We'll do better next time! / 我們會繼續改進！")
 
 # 2. 核心 AI 函數
-PRIMARY_MODEL = 'gemini-2.5-flash'
+# MODEL_TIERS 已定義於頂部 key rotation 區段
 
 def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, uploaded_image=None, custom_prompt=None):
     if not ALL_API_KEYS:
@@ -513,58 +575,76 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
     )
     
     last_error = None
-    # ── 方案二：Key Rotation Fallback（同一模型，換 Key 重試）──
-    # 429/quota 時立刻換下一把 Key，全部輪過才放棄，不降階模型
-    max_retries = len(ALL_API_KEYS) * 2  # 每張 key 最多試 2 次
-    for attempt in range(max_retries):
-        current_key = _pick_api_key()
-        if not current_key:
-            return None, "Error: 所有 API Key 均不可用"
-        try:
-            genai.configure(api_key=current_key)
-            model = genai.GenerativeModel(PRIMARY_MODEL)
+    import re, json
 
-            content_list = [prompt]
-            if uploaded_image:
-                import PIL.Image
-                img = PIL.Image.open(uploaded_image)
-                content_list.append(img)
+    # ── Model Tier × Key 二維 Fallback 邏輯 ──
+    # 優先序：gemini-3.5-flash → gemini-2.5-flash → gemini-3.1-flash-lite
+    # 每個 Model Tier 內：主動偵測 RPD Soft Limit（不等 429），所有 Key 達標才降到下一 Tier
+    # 429（RPM）仍即時換 Key 並標記冷卻
+    for tier in MODEL_TIERS:
+        model_name     = tier["name"]
+        rpd_soft_limit = tier["rpd_soft_limit"]
 
-            response = model.generate_content(content_list)
-            text = response.text
+        # 在此 Tier 內最多嘗試 key 數 × 2 次（防止單 key 偶發錯誤）
+        max_attempts = len(ALL_API_KEYS) * 2
+        for attempt in range(max_attempts):
+            key_idx, current_key = _pick_key_for_model(model_name, rpd_soft_limit)
+            if key_idx is None:
+                # 此 Tier 所有 Key 的今日 RPD 均已達軟限 → 降到下一 Tier
+                print(f"[Quota] All keys hit RPD soft limit for {model_name}, trying next tier")
+                break
 
-            import json
-            clean_text = text.strip()
-            start_idx = clean_text.find('{')
-            end_idx = clean_text.rfind('}')
+            try:
+                genai.configure(api_key=current_key)
+                model = genai.GenerativeModel(model_name)
 
-            if start_idx != -1 and end_idx != -1:
-                data = json.loads(clean_text[start_idx:end_idx+1])
-                return {
-                    "critique": data.get("critique", ""),
-                    "zara_items": data.get("zara_items", []),
-                    "other_brands": data.get("other_brands", []),
-                    "accessories": data.get("accessories", []),
-                    "description": data.get("description", ""),
-                    "model_used": PRIMARY_MODEL,
-                    "key_used": attempt,  # 方便 debug 知道第幾把 key 成功
-                }, None
-        except Exception as e:
-            last_error = str(e)
-            if "429" in last_error or "quota" in last_error.lower() or "rate" in last_error.lower():
-                # 解析 retry-after 秒數（若 Google API 有提供）
-                retry_secs = 65  # 預設冷卻 65 秒
-                import re
-                m = re.search(r'retry_delay.*?seconds.*?(\d+)', last_error, re.DOTALL)
-                if m:
-                    retry_secs = int(m.group(1)) + 2
-                _mark_key_rate_limited(retry_secs)
-                print(f"[KeyRotation] attempt {attempt}: 429 on key, rotating. retry_secs={retry_secs}")
-                continue  # 立刻以下一把 key 重試
-            # 非限流錯誤（網路、JSON 解析等）直接中止
-            return None, f"API Error: {last_error}"
+                content_list = [prompt]
+                if uploaded_image:
+                    import PIL.Image
+                    img = PIL.Image.open(uploaded_image)
+                    content_list.append(img)
 
-    return None, f"All keys exhausted after {max_retries} attempts. Last error: {last_error}"
+                response = model.generate_content(content_list)
+                text = response.text
+
+                clean_text = text.strip()
+                start_idx = clean_text.find('{')
+                end_idx   = clean_text.rfind('}')
+
+                if start_idx != -1 and end_idx != -1:
+                    data = json.loads(clean_text[start_idx:end_idx+1])
+                    # 成功：遞增計數 + 寫回 Supabase
+                    with _key_lock:
+                        _inc_daily_count(key_idx, model_name)
+                        count = _daily_count.get((key_idx, model_name), 1)
+                    _sb_quota_upsert(key_idx, model_name, count)
+                    return {
+                        "critique":     data.get("critique", ""),
+                        "zara_items":   data.get("zara_items", []),
+                        "other_brands": data.get("other_brands", []),
+                        "accessories":  data.get("accessories", []),
+                        "description":  data.get("description", ""),
+                        "model_used":   model_name,
+                        "key_used":     key_idx,
+                    }, None
+
+            except Exception as e:
+                last_error = str(e)
+                is_rate_limit = ("429" in last_error or
+                                 "quota" in last_error.lower() or
+                                 "rate" in last_error.lower())
+                if is_rate_limit:
+                    retry_secs = 65
+                    m = re.search(r'retry_delay.*?seconds.*?(\d+)', last_error, re.DOTALL)
+                    if m:
+                        retry_secs = int(m.group(1)) + 2
+                    _mark_key_rpm_limited(key_idx, retry_secs)
+                    print(f"[KeyRotation] Key#{key_idx} {model_name} RPM 429, cooldown={retry_secs}s")
+                    continue  # 同 Tier 換下一把 Key
+                # 非限流錯誤（網路、JSON 解析失敗等）→ 直接中止，不浪費 quota
+                return None, f"API Error: {last_error}"
+
+    return None, f"所有 Model Tier 與 API Key 均已耗盡。Last error: {last_error}"
 
 # Helper for base64 images
 def get_base64_image(path):
