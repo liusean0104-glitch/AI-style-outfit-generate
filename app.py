@@ -176,6 +176,13 @@ if "_rec_cache" not in st.session_state:
 # 方案四：前端節流 — 記錄每個 session 上次生成時間
 if "_last_gen_time" not in st.session_state:
     st.session_state["_last_gen_time"] = 0.0
+# 方案 E：Outfit Builder 狀態
+if "builder_items" not in st.session_state:
+    st.session_state["builder_items"] = {}   # {category: item_dict}
+if "builder_swapping" not in st.session_state:
+    st.session_state["builder_swapping"] = None  # 目前正在換哪個 category
+if "pro_intent_clicked" not in st.session_state:
+    st.session_state["pro_intent_clicked"] = False  # 方案 D 付費意願追蹤
 
 # 2. 注入自定義 CSS (Minimalist Luxury / ZARA Aesthetic)
 st.markdown("""
@@ -646,6 +653,85 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
 
     return None, f"所有 Model Tier 與 API Key 均已耗盡。Last error: {last_error}"
 
+# ── 方案 E：換單品 API（輕量，只換一個 category）────────────────────────────
+def get_single_item_swap(
+    category: str,          # "top" / "pants" / "shoes"
+    locked_items: list,     # 已鎖定的其他品項（不換）
+    gender, height, weight, season, occ, wea, sty, lang
+) -> dict | None:
+    """
+    只針對指定 category 重新生成一個 ZARA 單品，
+    同時告知 AI 已有哪些品項被鎖定，確保搭配協調。
+    消耗約 300-500 tokens，遠小於全套重生成。
+    """
+    if not ALL_API_KEYS:
+        return None
+
+    sty_str = ', '.join(sty) if sty else "general"
+    cat_label = {"top": "上衣/Top", "pants": "下身/Pants or Skirt", "shoes": "鞋子/Shoes"}.get(category, category)
+    locked_desc = ""
+    if locked_items:
+        locked_desc = "LOCKED ITEMS (already chosen, do NOT change these):\n"
+        for item in locked_items:
+            locked_desc += f"  - {item.get('name','')} ({item.get('category','')}): {item.get('reason','')}\n"
+
+    currency_instruction = "Estimate price in NTD (TWD) for 繁體中文, or USD for English."
+
+    prompt = (
+        f"You are a pragmatic fashion stylist. "
+        f"User: Gender={gender}, Height={height}cm, Weight={weight}kg. "
+        f"Context: Season={season}, Occasion={occ}, Weather={wea}, Style={sty_str}.\n"
+        f"{locked_desc}\n"
+        f"TASK: Suggest ONE new ZARA item for category: {cat_label}.\n"
+        f"It must coordinate with the locked items above. Different from any item already mentioned.\n"
+        f"LANGUAGE: Respond in {lang}.\n"
+        f"CURRENCY: {currency_instruction}\n"
+        f"Return ONLY valid JSON (no markdown):\n"
+        f"{{\n"
+        f"  \"name\": \"ZARA [item name]\",\n"
+        f"  \"reason\": \"Why this fits physique and coordinates with locked items.\",\n"
+        f"  \"category\": \"{category}\",\n"
+        f"  \"price_range\": \"estimated price\",\n"
+        f"  \"recommended_size\": \"size based on height/weight\"\n"
+        f"}}\n"
+    )
+
+    import re, json
+    last_error = None
+    for tier in MODEL_TIERS:
+        model_name     = tier["name"]
+        rpd_soft_limit = tier["rpd_soft_limit"]
+        for attempt in range(len(ALL_API_KEYS) * 2):
+            key_idx, current_key = _pick_key_for_model(model_name, rpd_soft_limit)
+            if key_idx is None:
+                break
+            try:
+                genai.configure(api_key=current_key)
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content([prompt])
+                text = response.text.strip()
+                start = text.find('{')
+                end   = text.rfind('}')
+                if start != -1 and end != -1:
+                    data = json.loads(text[start:end+1])
+                    with _key_lock:
+                        _inc_daily_count(key_idx, model_name)
+                        count = _daily_count.get((key_idx, model_name), 1)
+                    _sb_quota_upsert(key_idx, model_name, count)
+                    return data
+            except Exception as e:
+                last_error = str(e)
+                is_rate = "429" in last_error or "quota" in last_error.lower()
+                if is_rate:
+                    retry_secs = 65
+                    m = re.search(r'retry_delay.*?seconds.*?(\d+)', last_error, re.DOTALL)
+                    if m:
+                        retry_secs = int(m.group(1)) + 2
+                    _mark_key_rpm_limited(key_idx, retry_secs)
+                    continue
+                return None
+    return None
+
 # Helper for base64 images
 def get_base64_image(path):
     import base64
@@ -855,6 +941,17 @@ elif st.button(t["btn"]):
         else:
             result["latency_ms"] = int((time.time() - start_time) * 1000)
             st.session_state.last_result = result
+
+            # ── 方案 E：初始化 Outfit Builder（以 zara_items 為起點）──
+            builder_init = {}
+            for item in result.get("zara_items", []):
+                cat = item.get("category", "others").lower()
+                # 以 top/pants/shoes 三個 slot 為主
+                slot = "top" if "top" in cat else ("pants" if "pant" in cat or "skirt" in cat else ("shoes" if "shoe" in cat else cat))
+                if slot not in builder_init:
+                    builder_init[slot] = item
+            st.session_state["builder_items"] = builder_init
+            st.session_state["builder_swapping"] = None
 
             # ── 方案三：成功後存入 cache（僅限可快取請求）──
             if _is_cacheable and _cache_key:
@@ -1340,6 +1437,164 @@ if st.session_state.last_result:
                 <div style="font-family:'Inter',sans-serif; font-size:0.8rem; color:#777; line-height:1.5;">{reason}</div>
             </div>
             """, unsafe_allow_html=True)
+
+    # ─────────────────────────────────────────────────────────────────
+    # 方案 E：OUTFIT BUILDER
+    # ─────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown(
+        """<div style="font-family:Bodoni Moda,serif; font-size:1.4rem; """
+        """letter-spacing:3px; margin-bottom:0.3rem;">BUILD YOUR LOOK</div>""",
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        """<div style="font-family:Inter,sans-serif; font-size:0.75rem; """
+        """letter-spacing:2px; color:#999; text-transform:uppercase; margin-bottom:1.5rem;">"""
+        """Swap individual pieces · keep what you love</div>""",
+        unsafe_allow_html=True
+    )
+
+    builder_items = st.session_state.get("builder_items", {})
+    builder_swapping = st.session_state.get("builder_swapping")
+
+    SLOT_LABELS = {
+        "top":   ("上衣", "Top"),
+        "pants": ("下身", "Bottoms"),
+        "shoes": ("鞋子", "Shoes"),
+    }
+    SLOT_EMOJI = {"top": "👕", "pants": "👖", "shoes": "👟"}
+
+    # ── 如果正在換某個 slot，先執行 API call ──
+    if builder_swapping:
+        with st.spinner(f"Finding a new {builder_swapping}..."):
+            locked = [v for k, v in builder_items.items() if k != builder_swapping]
+            new_item = get_single_item_swap(
+                category=builder_swapping,
+                locked_items=locked,
+                gender=user_gender, height=user_height, weight=user_weight,
+                season=user_season, occ=user_occ, wea=user_wea,
+                sty=user_sty, lang=lang_select
+            )
+            if new_item:
+                st.session_state["builder_items"][builder_swapping] = new_item
+                builder_items = st.session_state["builder_items"]
+            st.session_state["builder_swapping"] = None
+
+    # ── 顯示三個 slot ──
+    slot_cols = st.columns(3)
+    for i, slot in enumerate(["top", "pants", "shoes"]):
+        item = builder_items.get(slot)
+        zh_label, en_label = SLOT_LABELS[slot]
+        slot_label = zh_label if lang_select == "繁體中文" else en_label
+        emoji = SLOT_EMOJI[slot]
+
+        with slot_cols[i]:
+            st.markdown(
+                f'<div style="font-family:Inter,sans-serif; font-size:0.65rem; '
+                f'letter-spacing:3px; color:#aaa; text-transform:uppercase; '
+                f'margin-bottom:0.5rem;">{emoji} {slot_label}</div>',
+                unsafe_allow_html=True
+            )
+            if item:
+                # 圖片
+                builder_img_key = f"builder_img_{slot}"
+                if builder_img_key not in st.session_state:
+                    st.session_state[builder_img_key] = get_item_image(
+                        item.get("name",""), user_gender, slot,
+                        style=user_sty[0] if user_sty else "all",
+                        season=user_season, occasion=user_occ
+                    )
+                img_url = st.session_state.get(builder_img_key, "")
+                if img_url:
+                    st.markdown(
+                        f'<div class="img-container" style="margin-bottom:0.6rem;">'
+                        f'<img src="{img_url}"></div>',
+                        unsafe_allow_html=True
+                    )
+                # 品項名稱
+                st.markdown(
+                    f'<div style="font-family:Inter,sans-serif; font-weight:600; '
+                    f'font-size:0.82rem; margin-bottom:0.2rem; line-height:1.3;">'
+                    f'{item.get("name","")}</div>',
+                    unsafe_allow_html=True
+                )
+                # 價格 & 尺寸
+                price = item.get("price_range","")
+                size  = item.get("recommended_size","")
+                if price or size:
+                    size_txt = f" · {size}" if size else ""
+                    st.markdown(
+                        f'<div style="font-family:Inter,sans-serif; font-size:0.7rem; '
+                        f'color:#aaa; margin-bottom:0.6rem;">{price}{size_txt}</div>',
+                        unsafe_allow_html=True
+                    )
+                # 換掉這件按鈕
+                swap_label = f"↺ 換一件{zh_label}" if lang_select == "繁體中文" else f"↺ Swap {en_label}"
+                if st.button(swap_label, key=f"swap_{slot}"):
+                    # 清除這個 slot 的圖片 cache
+                    if f"builder_img_{slot}" in st.session_state:
+                        del st.session_state[f"builder_img_{slot}"]
+                    st.session_state["builder_swapping"] = slot
+                    st.rerun()
+            else:
+                st.markdown(
+                    f'<div style="font-family:Inter,sans-serif; font-size:0.78rem; '
+                    f'color:#ccc; padding:2rem 0;">—</div>',
+                    unsafe_allow_html=True
+                )
+
+    # ── 目前搭配摘要 ──
+    if builder_items:
+        combo_names = " + ".join(
+            builder_items.get(s, {}).get("name", "?")
+            for s in ["top", "pants", "shoes"]
+            if builder_items.get(s)
+        )
+        st.markdown(
+            f'<div style="font-family:Inter,sans-serif; font-size:0.78rem; '
+            f'color:#555; margin-top:1rem; padding:0.8rem 1rem; '
+            f'background:#f9f9f9; border-left:2px solid #111;">'
+            f'✦ {combo_names}</div>',
+            unsafe_allow_html=True
+        )
+
+    # ─────────────────────────────────────────────────────────────────
+    # 方案 D：AI 穿搭圖生成（Pro 功能 · 付費意願追蹤）
+    # ─────────────────────────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    pro_label = "✨ 生成完整穿搭圖（Pro 功能）" if lang_select == "繁體中文" else "✨ Generate Outfit Visual (Pro Feature)"
+    pro_help  = "升級 Pro 版即可生成 AI 穿搭圖像" if lang_select == "繁體中文" else "Upgrade to Pro to generate AI outfit visuals"
+
+    col_pro, col_spacer = st.columns([1.5, 2])
+    with col_pro:
+        if st.button(pro_label, help=pro_help, type="secondary"):
+            st.session_state["pro_intent_clicked"] = True
+            log_event("pro_intent_click")  # 記錄到 Supabase events 表
+            st.rerun()
+
+    if st.session_state.get("pro_intent_clicked"):
+        st.markdown(
+            '<div style="font-family:Inter,sans-serif; font-size:0.82rem; '
+            'color:#555; padding:1rem; border:1px solid #eee; margin-top:0.5rem; '
+            'background:#fafafa;">'
+            '🔒 <b>Pro 版功能</b>：一鍵生成完整穿搭 AI 圖像，支援 flat lay 風格與模特展示圖。'
+            '<br>Pro feature coming soon — leave your email to join the waitlist.</div>'
+            if lang_select == "繁體中文" else
+            '<div style="font-family:Inter,sans-serif; font-size:0.82rem; '
+            'color:#555; padding:1rem; border:1px solid #eee; margin-top:0.5rem; '
+            'background:#fafafa;">'
+            '🔒 <b>Pro Feature</b>: Generate a full AI outfit visual — flat lay or model shot — in one click.'
+            '<br>Coming soon. Leave your email to join the waitlist.</div>',
+            unsafe_allow_html=True
+        )
+        waitlist_email = st.text_input(
+            "Email（選填）" if lang_select == "繁體中文" else "Email (optional)",
+            placeholder="your@email.com",
+            key="waitlist_email_input"
+        )
+        if waitlist_email and st.button("加入候補名單" if lang_select == "繁體中文" else "Join Waitlist"):
+            log_event("waitlist_signup", item_name=waitlist_email)
+            st.success("✓ 已收到！我們會在 Pro 版上線時通知您。" if lang_select == "繁體中文" else "✓ Got it! We'll notify you when Pro launches.")
 
     # Feedback
     st.markdown("---")
