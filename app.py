@@ -135,6 +135,51 @@ def _sb_quota_upsert(key_idx: int, model_name: str, count: int):
     except Exception as e:
         print(f"[Quota] upsert failed: {e}")
 
+# ── Supabase 圖片 URL Cache（item_name → url，命中就跳過比對）──
+# Supabase table: item_image_cache (item_name text PK, url text, gender text, updated_at timestamptz)
+_IMG_CACHE_LOCAL: dict = {}   # 模組層級記憶體 cache，重啟歸零
+
+def _sb_img_get(item_name: str) -> str:
+    """從記憶體或 Supabase 取圖片 URL，找不到回傳空字串。"""
+    key = item_name.lower().strip()
+    if key in _IMG_CACHE_LOCAL:
+        return _IMG_CACHE_LOCAL[key]
+    if not sb_url or not sb_key:
+        return ""
+    try:
+        import urllib.parse as _up
+        url = f"{sb_url}/rest/v1/item_image_cache?item_name=eq.{_up.quote(key)}&select=url"
+        headers = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
+        r = requests.get(url, headers=headers, timeout=2)
+        if r.ok:
+            rows = r.json()
+            if rows:
+                img_url = rows[0].get("url", "")
+                _IMG_CACHE_LOCAL[key] = img_url
+                return img_url
+    except Exception as e:
+        print(f"[ImgCache] get failed: {e}")
+    return ""
+
+def _sb_img_set(item_name: str, img_url: str, gender: str = ""):
+    """把 item_name → url 存進 Supabase 和記憶體 cache。"""
+    if not img_url or not sb_url or not sb_key:
+        return
+    key = item_name.lower().strip()
+    _IMG_CACHE_LOCAL[key] = img_url
+    try:
+        url = f"{sb_url}/rest/v1/item_image_cache"
+        headers = {
+            "apikey": sb_key,
+            "Authorization": f"Bearer {sb_key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        }
+        payload = {"item_name": key, "url": img_url, "gender": gender}
+        requests.post(url, headers=headers, json=payload, timeout=2)
+    except Exception as e:
+        print(f"[ImgCache] set failed: {e}")
+
 # ── 方案三：Response Cache（模組層級，跨 session 共享）──
 # 只快取「無圖、無 custom prompt」的標準請求，key = 選單組合
 import hashlib as _hashlib
@@ -1174,18 +1219,26 @@ def get_local_image_data_uri(filename: str) -> str:
 
 def get_item_image(item_name: str, gender: str, category: str = "others",
                    style: str = "all", season: str = "all", occasion: str = "all") -> str:
-    """名稱比對優先，組合鍵僅在有明確 style 時作 fallback。"""
+    """名稱比對優先，組合鍵僅在有明確 style 時作 fallback。比對成功自動存 Supabase cache。"""
     n = item_name.lower().strip()
+
+    # 0. Supabase 圖片 cache 優先（命中直接回傳，不走後續比對）
+    cached = _sb_img_get(n)
+    if cached:
+        return cached
 
     # 1. Padres 特例優先（不論 season / gender）
     for padres_key in ("padres home jersey", "padres city connect jersey",
                        "教士隊主場球衣", "教士隊城市限定球衣"):
         if padres_key in n:
-            return _NAME_TO_URL.get(padres_key, "")
+            url = _NAME_TO_URL.get(padres_key, "")
+            if url: _sb_img_set(n, url, gender)
+            return url
 
     # 2. 名稱直接命中 _NAME_TO_URL
     direct = _NAME_TO_URL.get(n)
     if direct:
+        _sb_img_set(n, direct, gender)
         return direct
 
     # 3. 別名表 → _NAME_TO_URL
@@ -1193,11 +1246,13 @@ def get_item_image(item_name: str, gender: str, category: str = "others",
     if canonical:
         url = _NAME_TO_URL.get(canonical.lower(), "")
         if url:
+            _sb_img_set(n, url, gender)
             return url
 
     # 4. 子字串模糊比對（AI 輸出常帶品牌前綴，如 "ZARA 亞麻混紡寬版襯衫"）
     for key, url in _NAME_TO_URL.items():
         if key in n or n in key:
+            _sb_img_set(n, url, gender)
             return url
 
     # 5. 組合鍵（Composite Key）兜底比對
@@ -1225,29 +1280,50 @@ def get_item_image(item_name: str, gender: str, category: str = "others",
                     if composite_key in COMPOSITE_DICT:
                         return COMPOSITE_DICT[composite_key]
 
-    # 6. 最終 fallback：按 gender × category 回傳固定 ZARA URL，永遠有圖
+    # 6. 最終 fallback：按 gender × slot，給 3 個不同 URL 輪流（用 item_name hash 決定）
+    #    確保同一 session 中不同候補品項拿到不同圖片，視覺上有差異
     g = _normalize_gender(gender)
     ca = category.lower()
     slot = "top" if "top" in ca else ("pants" if "pant" in ca or "skirt" in ca else ("shoes" if "shoe" in ca else "top"))
 
-    FALLBACK_URLS = {
-        # Male
-        ("male", "top"):   "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
-        ("male", "pants"): "https://static.zara.net/assets/public/0fca/b5a0/ea5d4b3fbe4d/6d1f8a2c3e9b/02318410800-e1/02318410800-e1.jpg?ts=1771492805494&w=750",
-        ("male", "shoes"): "https://static.zara.net/assets/public/8dd7/c670/40b047c68246/c739d76bde81/15037710002-e1/15037710002-e1.jpg?ts=1771515859118&w=1024",
-        # Female
-        ("female", "top"):   "https://static.zara.net/assets/public/fa9e/1985/508e4ae9a96a/ca968a6a6bfa/08648023712-e1/08648023712-e1.jpg?ts=1770813038309&w=750",
-        ("female", "pants"): "https://static.zara.net/assets/public/98bb/0b0f/04fb4cf990bc/929e28113793/02103122104-e1/02103122104-e1.jpg?ts=1774347716612&w=750",
-        ("female", "shoes"): "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
-        # Other / unknown → male fallbacks
-        ("other", "top"):   "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
-        ("other", "pants"): "https://static.zara.net/assets/public/0fca/b5a0/ea5d4b3fbe4d/6d1f8a2c3e9b/02318410800-e1/02318410800-e1.jpg?ts=1771492805494&w=750",
-        ("other", "shoes"): "https://static.zara.net/assets/public/8dd7/c670/40b047c68246/c739d76bde81/15037710002-e1/15037710002-e1.jpg?ts=1771515859118&w=1024",
+    FALLBACK_POOL = {
+        ("male", "top"): [
+            "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
+            "https://i.postimg.cc/vZ2mRyNR/bai-se-T-Shirt.jpg",
+            "https://i.postimg.cc/fRqb4sgr/polo-shan.jpg",
+        ],
+        ("male", "pants"): [
+            "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
+            "https://i.postimg.cc/x1pdrQ41/kuan-xi-zhuang-zhang-ku.jpg",
+            "https://i.postimg.cc/JzYhw827/xi-zhuang-zhang-ku.jpg",
+        ],
+        ("male", "shoes"): [
+            "https://static.zara.net/assets/public/8dd7/c670/40b047c68246/c739d76bde81/15037710002-e1/15037710002-e1.jpg?ts=1771515859118&w=1024",
+            "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
+            "https://i.postimg.cc/qvD7fr5p/pi-le-fu-xie.jpg",
+        ],
+        ("female", "top"): [
+            "https://static.zara.net/assets/public/fa9e/1985/508e4ae9a96a/ca968a6a6bfa/08648023712-e1/08648023712-e1.jpg?ts=1770813038309&w=750",
+            "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
+            "https://i.postimg.cc/766cFvdV/nu-luo-wen-duan-xiu-T-shirt.jpg",
+        ],
+        ("female", "pants"): [
+            "https://i.postimg.cc/0y7qns1n/nu-kuan-ku.jpg",
+            "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
+            "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
+        ],
+        ("female", "shoes"): [
+            "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
+            "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
+            "https://i.postimg.cc/qvD7fr5p/pi-le-fu-xie.jpg",
+        ],
     }
 
-    url = FALLBACK_URLS.get((g, slot)) or FALLBACK_URLS.get(("male", slot), "")
-    if url:
-        return url
+    pool = FALLBACK_POOL.get((g, slot)) or FALLBACK_POOL.get(("male", slot), [])
+    if pool:
+        # 用 item_name 的 hash 決定取哪一張，同名稱永遠對應同一張，不同名稱大機率不同張
+        pick = abs(hash(item_name)) % len(pool)
+        return pool[pick]
 
     return ""
 
