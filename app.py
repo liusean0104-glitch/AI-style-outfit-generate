@@ -625,14 +625,40 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
                         _inc_daily_count(key_idx, model_name)
                         count = _daily_count.get((key_idx, model_name), 1)
                     _sb_quota_upsert(key_idx, model_name, count)
+
+                    # ── 解析候補池格式（top_options/pants_options/shoes_options）──
+                    def _inject_cat(opts, cat):
+                        for it in opts:
+                            it["category"] = cat
+                        return opts
+
+                    top_opts   = _inject_cat(data.get("top_options",   []), "top")
+                    pants_opts = _inject_cat(data.get("pants_options", []), "pants")
+                    shoes_opts = _inject_cat(data.get("shoes_options", []), "shoes")
+
+                    # 相容舊格式（zara_items）
+                    if not top_opts and not pants_opts and not shoes_opts:
+                        for it in data.get("zara_items", []):
+                            cat = it.get("category","").lower()
+                            slot = "top" if "top" in cat else ("pants" if "pant" in cat or "skirt" in cat else "shoes")
+                            if slot == "top":    top_opts.append(it)
+                            elif slot == "pants": pants_opts.append(it)
+                            else:               shoes_opts.append(it)
+
+                    # zara_items = 每個 category 的第一件，供主畫面顯示
+                    zara_items_main = [o[0] for o in [top_opts, pants_opts, shoes_opts] if o]
+
                     return {
-                        "critique":     data.get("critique", ""),
-                        "zara_items":   data.get("zara_items", []),
-                        "other_brands": data.get("other_brands", []),
-                        "accessories":  data.get("accessories", []),
-                        "description":  data.get("description", ""),
-                        "model_used":   model_name,
-                        "key_used":     key_idx,
+                        "critique":      data.get("critique", ""),
+                        "zara_items":    zara_items_main,
+                        "top_options":   top_opts,
+                        "pants_options": pants_opts,
+                        "shoes_options": shoes_opts,
+                        "other_brands":  data.get("other_brands", []),
+                        "accessories":   data.get("accessories", []),
+                        "description":   data.get("description", ""),
+                        "model_used":    model_name,
+                        "key_used":      key_idx,
                     }, None
 
             except Exception as e:
@@ -1367,12 +1393,21 @@ if st.session_state.last_result:
         # 圖片 cache：避免每次按鈕 rerun 重新搜尋
         img_cache_key = f"img_{idx}"
         if img_cache_key not in st.session_state:
-            # 傳入第一個已選風格供組合鍵 fallback 使用
-            primary_style = user_sty[0] if user_sty else "all"
-            st.session_state[img_cache_key] = get_item_image(
-                raw_name, user_gender, category,
-                style=primary_style, season=user_season, occasion=user_occ
-            )
+            # Padres 第一件：直接給 jersey URL，不走比對
+            _is_padres_item = (idx == 0 and any(s in (user_sty or [])
+                               for s in ["Padres City Connect Jersey","Padres Home Jersey"]))
+            if _is_padres_item:
+                _rn = raw_name.lower()
+                if "city connect" in _rn or "城市限定" in _rn:
+                    st.session_state[img_cache_key] = "https://i.postimg.cc/cLXyQZwy/city-connect.jpg"
+                else:
+                    st.session_state[img_cache_key] = "https://i.postimg.cc/4xBkzZVC/home-jersey.avif"
+            else:
+                primary_style = user_sty[0] if user_sty else "all"
+                st.session_state[img_cache_key] = get_item_image(
+                    raw_name, user_gender, category,
+                    style=primary_style, season=user_season, occasion=user_occ
+                )
         img_url = st.session_state[img_cache_key]
 
         if img_url:
