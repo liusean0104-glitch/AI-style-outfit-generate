@@ -887,8 +887,11 @@ elif st.button(t["btn"]):
 
     # 清除舊的圖片與曝光 cache，避免重新生成時殘留
     for key in list(st.session_state.keys()):
-        if key.startswith("img_") or key.startswith("imp_"):
+        if key.startswith("img_") or key.startswith("imp_") or key.startswith("bimg_"):
             del st.session_state[key]
+    # 清除 Builder 舊狀態，避免換風格後殘留舊 pool
+    st.session_state["builder_pool"] = {}
+    st.session_state["builder_idx"]  = {"top":0,"pants":0,"shoes":0}
 
     # ── 方案三：Cache 命中檢查（僅限無圖、無 custom prompt）──
     _cache_key = None
@@ -1517,7 +1520,10 @@ if st.session_state.last_result:
     )
 
     builder_pool = st.session_state.get("builder_pool", {})
-    builder_idx  = st.session_state.get("builder_idx", {"top":0,"pants":0,"shoes":0})
+    # builder_idx 直接操作 session_state，確保 swap 後狀態正確保存
+    if "builder_idx" not in st.session_state:
+        st.session_state["builder_idx"] = {"top":0,"pants":0,"shoes":0}
+    builder_idx = st.session_state["builder_idx"]
 
     SLOT_LABELS = {"top":("上衣","Top"), "pants":("下身","Bottoms"), "shoes":("鞋子","Shoes")}
     SLOT_EMOJI  = {"top":"👕", "pants":"👖", "shoes":"👟"}
@@ -1596,6 +1602,7 @@ if st.session_state.last_result:
                     if st.button(swap_label, key=f"swap_{slot}"):
                         new_idx = (idx + 1) % total
                         st.session_state["builder_idx"][slot] = new_idx
+                        # 不需要清 bimg_ cache，所有圖片預載時已存好
                         st.rerun()
             else:
                 st.markdown(
