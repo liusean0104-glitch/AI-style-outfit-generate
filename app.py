@@ -135,51 +135,6 @@ def _sb_quota_upsert(key_idx: int, model_name: str, count: int):
     except Exception as e:
         print(f"[Quota] upsert failed: {e}")
 
-# ── Supabase 圖片 URL Cache（item_name → url，命中就跳過比對）──
-# Supabase table: item_image_cache (item_name text PK, url text, gender text, updated_at timestamptz)
-_IMG_CACHE_LOCAL: dict = {}   # 模組層級記憶體 cache，重啟歸零
-
-def _sb_img_get(item_name: str) -> str:
-    """從記憶體或 Supabase 取圖片 URL，找不到回傳空字串。"""
-    key = item_name.lower().strip()
-    if key in _IMG_CACHE_LOCAL:
-        return _IMG_CACHE_LOCAL[key]
-    if not sb_url or not sb_key:
-        return ""
-    try:
-        import urllib.parse as _up
-        url = f"{sb_url}/rest/v1/item_image_cache?item_name=eq.{_up.quote(key)}&select=url"
-        headers = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
-        r = requests.get(url, headers=headers, timeout=2)
-        if r.ok:
-            rows = r.json()
-            if rows:
-                img_url = rows[0].get("url", "")
-                _IMG_CACHE_LOCAL[key] = img_url
-                return img_url
-    except Exception as e:
-        print(f"[ImgCache] get failed: {e}")
-    return ""
-
-def _sb_img_set(item_name: str, img_url: str, gender: str = ""):
-    """把 item_name → url 存進 Supabase 和記憶體 cache。"""
-    if not img_url or not sb_url or not sb_key:
-        return
-    key = item_name.lower().strip()
-    _IMG_CACHE_LOCAL[key] = img_url
-    try:
-        url = f"{sb_url}/rest/v1/item_image_cache"
-        headers = {
-            "apikey": sb_key,
-            "Authorization": f"Bearer {sb_key}",
-            "Content-Type": "application/json",
-            "Prefer": "resolution=merge-duplicates,return=minimal",
-        }
-        payload = {"item_name": key, "url": img_url, "gender": gender}
-        requests.post(url, headers=headers, json=payload, timeout=2)
-    except Exception as e:
-        print(f"[ImgCache] set failed: {e}")
-
 # ── 方案三：Response Cache（模組層級，跨 session 共享）──
 # 只快取「無圖、無 custom prompt」的標準請求，key = 選單組合
 import hashlib as _hashlib
@@ -222,12 +177,10 @@ if "_rec_cache" not in st.session_state:
 if "_last_gen_time" not in st.session_state:
     st.session_state["_last_gen_time"] = 0.0
 # 方案 E：Outfit Builder 狀態
-if "builder_pool" not in st.session_state:
-    st.session_state["builder_pool"] = {}   # {slot: [item, item, item]}
-if "builder_idx" not in st.session_state:
-    st.session_state["builder_idx"] = {"top":0,"pants":0,"shoes":0}  # 目前各 slot 顯示第幾件
+if "builder_items" not in st.session_state:
+    st.session_state["builder_items"] = {}   # {category: item_dict}
 if "builder_swapping" not in st.session_state:
-    st.session_state["builder_swapping"] = None  # 保留欄位，現已不觸發 API
+    st.session_state["builder_swapping"] = None  # 目前正在換哪個 category
 if "pro_intent_clicked" not in st.session_state:
     st.session_state["pro_intent_clicked"] = False  # 方案 D 付費意願追蹤
 
@@ -571,16 +524,18 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
     if "Padres City Connect Jersey" in sty:
         specific_style_rule = (
             f"SPECIAL STYLE RULE: The user IS wearing a '{p_cc_name}' as the main top. "
-            f"In your JSON response, the first item in 'zara_items' MUST be exactly: "
+            f"In top_options, the FIRST item MUST be exactly: "
             f"{{\"name\": \"{p_cc_name}\", \"reason\": \"{p_cc_reason}\", \"category\": \"top\", \"price_range\": \"{p_price}\", \"recommended_size\": \"L\"}}. "
-            f"Do NOT suggest any other main tops. Focus entirely on matching pants, shoes, and inner layers."
+            f"The 2nd and 3rd top_options should be ZARA items that layer well under/over a baseball jersey (e.g. inner tee, light jacket). "
+            f"For pants_options and shoes_options, suggest items matching the Padres City Connect jersey colorway."
         )
     elif "Padres Home Jersey" in sty:
         specific_style_rule = (
             f"SPECIAL STYLE RULE: The user IS wearing a '{p_home_name}' as the main top. "
-            f"In your JSON response, the first item in 'zara_items' MUST be exactly: "
+            f"In top_options, the FIRST item MUST be exactly: "
             f"{{\"name\": \"{p_home_name}\", \"reason\": \"{p_home_reason}\", \"category\": \"top\", \"price_range\": \"{p_price}\", \"recommended_size\": \"L\"}}. "
-            f"Do NOT suggest any other main tops. Focus entirely on matching pants, shoes, and inner layers."
+            f"The 2nd and 3rd top_options should be ZARA items that layer well under/over a baseball jersey (e.g. inner tee, light jacket). "
+            f"For pants_options and shoes_options, suggest items matching the Padres Home jersey colorway."
         )
 
     custom_prompt_rule = ""
@@ -591,14 +546,6 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
             f"Please prioritize and adapt your recommended outfits, other brands, and accessories to fulfill this request."
         )
 
-    item_schema = (
-        f"      {{\n"
-        f"        \"name\": \"ZARA [Item Name]\",\n"
-        f"        \"reason\": \"≤15 words: why this fits.\",\n"
-        f"        \"price_range\": \"price\",\n"
-        f"        \"recommended_size\": \"size\"\n"
-        f"      }}"
-    )
     prompt = (
         f"{system_persona}\n"
         f"User Profile: Gender: {gender}, Height: {height}cm, Weight: {weight}kg.\n"
@@ -607,14 +554,18 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
         f"{custom_prompt_rule}\n"
         f"LANGUAGE RULE: Respond in {lang}. Use Traditional Chinese if '繁體中文'.\n"
         f"CURRENCY RULE: {currency_instruction}\n"
-        f"Provide response in valid JSON format ONLY.\n"
-        f"CRITICAL RULE: For top_options, pants_options, shoes_options — generate EXACTLY 3 DISTINCT items each.\n"
-        f"Each option must be a genuinely different garment (different cut, fabric, or style). Do NOT repeat items.\n"
+        f"Provide response in valid JSON format ONLY:\n"
         f"{{\n"
-        f"  \"critique\": \"(Optional) Analysis of uploaded outfit, otherwise empty.\",\n"
-        f"  \"top_options\":   [ {item_schema}, {item_schema}, {item_schema} ],\n"
-        f"  \"pants_options\": [ {item_schema}, {item_schema}, {item_schema} ],\n"
-        f"  \"shoes_options\": [ {item_schema}, {item_schema}, {item_schema} ],\n"
+        f"  \"critique\": \"(Optional) Analysis of uploaded outfit if provided, otherwise empty.\",\n"
+        f"  \"zara_items\": [\n"
+        f"    {{\n"
+        f"      \"name\": \"ZARA [Item Name]\",\n"
+        f"      \"reason\": \"Reason why this fits their physique.\",\n"
+        f"      \"category\": \"top/pants/shoes\",\n"
+        f"      \"price_range\": \"Estimated price range\",\n"
+        f"      \"recommended_size\": \"Calculated size (e.g. S, M, L, XL, EU 42) based on user's height/weight\"\n"
+        f"    }}\n"
+        f"  ],\n"
         f"  \"other_brands\": [\n"
         f"    {{\n"
         f"      \"name\": \"[Brand Name] [Item Name]\",\n"
@@ -629,7 +580,7 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
         f"  ],\n"
         f"  \"description\": \"A paragraph on the overall look.\"\n"
         f"}}\n"
-        f"CRITICAL: top_options=3, pants_options=3, shoes_options=3, other_brands=4-5, accessories=2.\n"
+        f"CRITICAL: 3 'zara_items', 4-5 'other_brands', 2 'accessories'.\n"
     )
     
     last_error = None
@@ -676,39 +627,9 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
                         _inc_daily_count(key_idx, model_name)
                         count = _daily_count.get((key_idx, model_name), 1)
                     _sb_quota_upsert(key_idx, model_name, count)
-
-                    # ── 解析候補池格式（新）或舊格式 ──
-                    def _inject_cat(opts, cat):
-                        """為候補清單每個 item 注入 category 欄位。"""
-                        for item in opts:
-                            item["category"] = cat
-                        return opts
-
-                    top_opts   = _inject_cat(data.get("top_options",   []), "top")
-                    pants_opts = _inject_cat(data.get("pants_options", []), "pants")
-                    shoes_opts = _inject_cat(data.get("shoes_options", []), "shoes")
-
-                    # 相容舊格式（zara_items）
-                    if not top_opts and not pants_opts and not shoes_opts:
-                        for item in data.get("zara_items", []):
-                            cat = item.get("category","").lower()
-                            slot = "top" if "top" in cat else ("pants" if "pant" in cat or "skirt" in cat else "shoes")
-                            if slot == "top":   top_opts.append(item)
-                            elif slot == "pants": pants_opts.append(item)
-                            else:              shoes_opts.append(item)
-
-                    # zara_items = 每個 category 的第一件，供主畫面顯示
-                    zara_items_main = []
-                    for opts in [top_opts, pants_opts, shoes_opts]:
-                        if opts:
-                            zara_items_main.append(opts[0])
-
                     return {
                         "critique":     data.get("critique", ""),
-                        "zara_items":   zara_items_main,
-                        "top_options":  top_opts,
-                        "pants_options":pants_opts,
-                        "shoes_options":shoes_opts,
+                        "zara_items":   data.get("zara_items", []),
                         "other_brands": data.get("other_brands", []),
                         "accessories":  data.get("accessories", []),
                         "description":  data.get("description", ""),
@@ -734,6 +655,84 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
 
     return None, f"所有 Model Tier 與 API Key 均已耗盡。Last error: {last_error}"
 
+# ── 方案 E：換單品 API（輕量，只換一個 category）────────────────────────────
+def get_single_item_swap(
+    category: str,          # "top" / "pants" / "shoes"
+    locked_items: list,     # 已鎖定的其他品項（不換）
+    gender, height, weight, season, occ, wea, sty, lang
+) -> dict | None:
+    """
+    只針對指定 category 重新生成一個 ZARA 單品，
+    同時告知 AI 已有哪些品項被鎖定，確保搭配協調。
+    消耗約 300-500 tokens，遠小於全套重生成。
+    """
+    if not ALL_API_KEYS:
+        return None
+
+    sty_str = ', '.join(sty) if sty else "general"
+    cat_label = {"top": "上衣/Top", "pants": "下身/Pants or Skirt", "shoes": "鞋子/Shoes"}.get(category, category)
+    locked_desc = ""
+    if locked_items:
+        locked_desc = "LOCKED ITEMS (already chosen, do NOT change these):\n"
+        for item in locked_items:
+            locked_desc += f"  - {item.get('name','')} ({item.get('category','')}): {item.get('reason','')}\n"
+
+    currency_instruction = "Estimate price in NTD (TWD) for 繁體中文, or USD for English."
+
+    prompt = (
+        f"You are a pragmatic fashion stylist. "
+        f"User: Gender={gender}, Height={height}cm, Weight={weight}kg. "
+        f"Context: Season={season}, Occasion={occ}, Weather={wea}, Style={sty_str}.\n"
+        f"{locked_desc}\n"
+        f"TASK: Suggest ONE new ZARA item for category: {cat_label}.\n"
+        f"It must coordinate with the locked items above. Different from any item already mentioned.\n"
+        f"LANGUAGE: Respond in {lang}.\n"
+        f"CURRENCY: {currency_instruction}\n"
+        f"Return ONLY valid JSON (no markdown):\n"
+        f"{{\n"
+        f"  \"name\": \"ZARA [item name]\",\n"
+        f"  \"reason\": \"Why this fits physique and coordinates with locked items.\",\n"
+        f"  \"category\": \"{category}\",\n"
+        f"  \"price_range\": \"estimated price\",\n"
+        f"  \"recommended_size\": \"size based on height/weight\"\n"
+        f"}}\n"
+    )
+
+    import re, json
+    last_error = None
+    for tier in MODEL_TIERS:
+        model_name     = tier["name"]
+        rpd_soft_limit = tier["rpd_soft_limit"]
+        for attempt in range(len(ALL_API_KEYS) * 2):
+            key_idx, current_key = _pick_key_for_model(model_name, rpd_soft_limit)
+            if key_idx is None:
+                break
+            try:
+                genai.configure(api_key=current_key)
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content([prompt])
+                text = response.text.strip()
+                start = text.find('{')
+                end   = text.rfind('}')
+                if start != -1 and end != -1:
+                    data = json.loads(text[start:end+1])
+                    with _key_lock:
+                        _inc_daily_count(key_idx, model_name)
+                        count = _daily_count.get((key_idx, model_name), 1)
+                    _sb_quota_upsert(key_idx, model_name, count)
+                    return data
+            except Exception as e:
+                last_error = str(e)
+                is_rate = "429" in last_error or "quota" in last_error.lower()
+                if is_rate:
+                    retry_secs = 65
+                    m = re.search(r'retry_delay.*?seconds.*?(\d+)', last_error, re.DOTALL)
+                    if m:
+                        retry_secs = int(m.group(1)) + 2
+                    _mark_key_rpm_limited(key_idx, retry_secs)
+                    continue
+                return None
+    return None
 
 # Helper for base64 images
 def get_base64_image(path):
@@ -916,7 +915,7 @@ elif st.button(t["btn"]):
             )
             tip_idx = 0
             start_time = time.time()
-            expected_seconds = 20  # 無圖約 15s，有圖 multi-modal 約 18-20s
+            expected_seconds = 25  # Increased for multi-modal analysis and image search
 
             while not future.done():
                 elapsed = time.time() - start_time
@@ -945,18 +944,16 @@ elif st.button(t["btn"]):
             result["latency_ms"] = int((time.time() - start_time) * 1000)
             st.session_state.last_result = result
 
-            # ── 方案 E：初始化 Outfit Builder 候補池（不耗 API，純前端切換）──
-            builder_pool = {
-                "top":   result.get("top_options",   []),
-                "pants": result.get("pants_options", []),
-                "shoes": result.get("shoes_options", []),
-            }
-            # 每個 slot 的目前索引（換件 = index + 1，不呼叫 API）
-            builder_idx = {"top": 0, "pants": 0, "shoes": 0}
-            st.session_state["builder_pool"] = builder_pool
-            st.session_state["builder_idx"]  = builder_idx
+            # ── 方案 E：初始化 Outfit Builder（以 zara_items 為起點）──
+            builder_init = {}
+            for item in result.get("zara_items", []):
+                cat = item.get("category", "others").lower()
+                # 以 top/pants/shoes 三個 slot 為主
+                slot = "top" if "top" in cat else ("pants" if "pant" in cat or "skirt" in cat else ("shoes" if "shoe" in cat else cat))
+                if slot not in builder_init:
+                    builder_init[slot] = item
+            st.session_state["builder_items"] = builder_init
             st.session_state["builder_swapping"] = None
-
 
             # ── 方案三：成功後存入 cache（僅限可快取請求）──
             if _is_cacheable and _cache_key:
@@ -1219,26 +1216,18 @@ def get_local_image_data_uri(filename: str) -> str:
 
 def get_item_image(item_name: str, gender: str, category: str = "others",
                    style: str = "all", season: str = "all", occasion: str = "all") -> str:
-    """名稱比對優先，組合鍵僅在有明確 style 時作 fallback。比對成功自動存 Supabase cache。"""
+    """名稱比對優先，組合鍵僅在有明確 style 時作 fallback。"""
     n = item_name.lower().strip()
-
-    # 0. Supabase 圖片 cache 優先（命中直接回傳，不走後續比對）
-    cached = _sb_img_get(n)
-    if cached:
-        return cached
 
     # 1. Padres 特例優先（不論 season / gender）
     for padres_key in ("padres home jersey", "padres city connect jersey",
                        "教士隊主場球衣", "教士隊城市限定球衣"):
         if padres_key in n:
-            url = _NAME_TO_URL.get(padres_key, "")
-            if url: _sb_img_set(n, url, gender)
-            return url
+            return _NAME_TO_URL.get(padres_key, "")
 
     # 2. 名稱直接命中 _NAME_TO_URL
     direct = _NAME_TO_URL.get(n)
     if direct:
-        _sb_img_set(n, direct, gender)
         return direct
 
     # 3. 別名表 → _NAME_TO_URL
@@ -1246,13 +1235,11 @@ def get_item_image(item_name: str, gender: str, category: str = "others",
     if canonical:
         url = _NAME_TO_URL.get(canonical.lower(), "")
         if url:
-            _sb_img_set(n, url, gender)
             return url
 
     # 4. 子字串模糊比對（AI 輸出常帶品牌前綴，如 "ZARA 亞麻混紡寬版襯衫"）
     for key, url in _NAME_TO_URL.items():
         if key in n or n in key:
-            _sb_img_set(n, url, gender)
             return url
 
     # 5. 組合鍵（Composite Key）兜底比對
@@ -1280,67 +1267,23 @@ def get_item_image(item_name: str, gender: str, category: str = "others",
                     if composite_key in COMPOSITE_DICT:
                         return COMPOSITE_DICT[composite_key]
 
-    # 6. 最終 fallback：按 gender × slot，給 3 個不同 URL 輪流（用 item_name hash 決定）
-    #    確保同一 session 中不同候補品項拿到不同圖片，視覺上有差異
-    g = _normalize_gender(gender)
-    ca = category.lower()
-    slot = "top" if "top" in ca else ("pants" if "pant" in ca or "skirt" in ca else ("shoes" if "shoe" in ca else "top"))
-
-    FALLBACK_POOL = {
-        ("male", "top"): [
-            "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
-            "https://i.postimg.cc/vZ2mRyNR/bai-se-T-Shirt.jpg",
-            "https://i.postimg.cc/fRqb4sgr/polo-shan.jpg",
-        ],
-        ("male", "pants"): [
-            "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
-            "https://i.postimg.cc/x1pdrQ41/kuan-xi-zhuang-zhang-ku.jpg",
-            "https://i.postimg.cc/JzYhw827/xi-zhuang-zhang-ku.jpg",
-        ],
-        ("male", "shoes"): [
-            "https://static.zara.net/assets/public/8dd7/c670/40b047c68246/c739d76bde81/15037710002-e1/15037710002-e1.jpg?ts=1771515859118&w=1024",
-            "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
-            "https://i.postimg.cc/qvD7fr5p/pi-le-fu-xie.jpg",
-        ],
-        ("female", "top"): [
-            "https://static.zara.net/assets/public/fa9e/1985/508e4ae9a96a/ca968a6a6bfa/08648023712-e1/08648023712-e1.jpg?ts=1770813038309&w=750",
-            "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
-            "https://i.postimg.cc/766cFvdV/nu-luo-wen-duan-xiu-T-shirt.jpg",
-        ],
-        ("female", "pants"): [
-            "https://i.postimg.cc/0y7qns1n/nu-kuan-ku.jpg",
-            "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
-            "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
-        ],
-        ("female", "shoes"): [
-            "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
-            "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
-            "https://i.postimg.cc/qvD7fr5p/pi-le-fu-xie.jpg",
-        ],
-    }
-
-    pool = FALLBACK_POOL.get((g, slot)) or FALLBACK_POOL.get(("male", slot), [])
-    if pool:
-        # 用 item_name 的 hash 決定取哪一張，同名稱永遠對應同一張，不同名稱大機率不同張
-        pick = abs(hash(item_name)) % len(pool)
-        return pool[pick]
+    # 6. 如果以上都失敗，使用本機預設圖檔 (base64 格式) 避免破圖
+    fallback_filename = f"{ca}.jpg"
+    if ca == "tops":
+        fallback_filename = "tops.jpg"
+    elif ca == "pants":
+        fallback_filename = "pants.jpg"
+    else:
+        fallback_filename = "others.jpg"
+    
+    local_b64 = get_local_image_data_uri(fallback_filename)
+    if local_b64:
+        return local_b64
 
     return ""
 
 
 # ─── Results Display ──────────────────────────────────────────────────────────
-# 圖片預載：在 get_item_image 定義後才執行，換件時 instant 切換
-if st.session_state.get("builder_pool"):
-    _primary_style = user_sty[0] if user_sty else "all"
-    for _slot, _opts in st.session_state["builder_pool"].items():
-        for _i, _item in enumerate(_opts):
-            _img_key = f"bimg_{_slot}_{_i}"
-            if _img_key not in st.session_state:
-                st.session_state[_img_key] = get_item_image(
-                    _item.get("name",""), user_gender, _slot,
-                    style=_primary_style, season=user_season, occasion=user_occ
-                )
-
 if st.session_state.last_result:
     res = st.session_state.last_result
     st.markdown("---")
@@ -1442,8 +1385,11 @@ if st.session_state.last_result:
                 f'color:#555; line-height:1.7; margin-bottom:1.5rem;">{reason}</div>',
                 unsafe_allow_html=True
             )
-            # ZARA gender-aware Discover button (skip for Padres jerseys)
-            if "Padres" not in name_brand and "教士隊" not in name_brand:
+            # ZARA gender-aware Discover button
+            # idx==0 + Padres 風格：第一件是球衣，不顯示 Discover 連結
+            _is_padres_style = any(s in (user_sty or []) for s in ["Padres City Connect Jersey", "Padres Home Jersey"])
+            _skip_discover = (idx == 0 and _is_padres_style)
+            if not _skip_discover:
                 search_query = urllib.parse.quote(name_brand)
                 section  = "MAN" if user_gender in ["Male", "男性"] else "WOMAN"
                 zara_url = f"https://www.zara.com/tw/zt/search?searchTerm={search_query}&section={section}"
@@ -1513,35 +1459,57 @@ if st.session_state.last_result:
         unsafe_allow_html=True
     )
 
-    builder_pool = st.session_state.get("builder_pool", {})
-    builder_idx  = st.session_state.get("builder_idx",  {"top":0,"pants":0,"shoes":0})
+    builder_items = st.session_state.get("builder_items", {})
+    builder_swapping = st.session_state.get("builder_swapping")
 
-    SLOT_LABELS = {"top":("上衣","Top"), "pants":("下身","Bottoms"), "shoes":("鞋子","Shoes")}
-    SLOT_EMOJI  = {"top":"👕", "pants":"👖", "shoes":"👟"}
+    SLOT_LABELS = {
+        "top":   ("上衣", "Top"),
+        "pants": ("下身", "Bottoms"),
+        "shoes": ("鞋子", "Shoes"),
+    }
+    SLOT_EMOJI = {"top": "👕", "pants": "👖", "shoes": "👟"}
+
+    # ── 如果正在換某個 slot，先執行 API call ──
+    if builder_swapping:
+        with st.spinner(f"Finding a new {builder_swapping}..."):
+            locked = [v for k, v in builder_items.items() if k != builder_swapping]
+            new_item = get_single_item_swap(
+                category=builder_swapping,
+                locked_items=locked,
+                gender=user_gender, height=user_height, weight=user_weight,
+                season=user_season, occ=user_occ, wea=user_wea,
+                sty=user_sty, lang=lang_select
+            )
+            if new_item:
+                st.session_state["builder_items"][builder_swapping] = new_item
+                builder_items = st.session_state["builder_items"]
+            st.session_state["builder_swapping"] = None
 
     # ── 顯示三個 slot ──
     slot_cols = st.columns(3)
-    for i, slot in enumerate(["top","pants","shoes"]):
-        opts = builder_pool.get(slot, [])
-        idx  = builder_idx.get(slot, 0)
-        item = opts[idx] if opts else None
+    for i, slot in enumerate(["top", "pants", "shoes"]):
+        item = builder_items.get(slot)
         zh_label, en_label = SLOT_LABELS[slot]
         slot_label = zh_label if lang_select == "繁體中文" else en_label
         emoji = SLOT_EMOJI[slot]
-        total = len(opts)
 
         with slot_cols[i]:
-            # Slot header + 第幾件指示
-            indicator = f" {idx+1}/{total}" if total > 1 else ""
             st.markdown(
                 f'<div style="font-family:Inter,sans-serif; font-size:0.65rem; '
                 f'letter-spacing:3px; color:#aaa; text-transform:uppercase; '
-                f'margin-bottom:0.5rem;">{emoji} {slot_label}{indicator}</div>',
+                f'margin-bottom:0.5rem;">{emoji} {slot_label}</div>',
                 unsafe_allow_html=True
             )
             if item:
-                # 圖片（已在生成時預 cache，直接取）
-                img_url = st.session_state.get(f"bimg_{slot}_{idx}", "")
+                # 圖片
+                builder_img_key = f"builder_img_{slot}"
+                if builder_img_key not in st.session_state:
+                    st.session_state[builder_img_key] = get_item_image(
+                        item.get("name",""), user_gender, slot,
+                        style=user_sty[0] if user_sty else "all",
+                        season=user_season, occasion=user_occ
+                    )
+                img_url = st.session_state.get(builder_img_key, "")
                 if img_url:
                     st.markdown(
                         f'<div class="img-container" style="margin-bottom:0.6rem;">'
@@ -1562,48 +1530,47 @@ if st.session_state.last_result:
                     size_txt = f" · {size}" if size else ""
                     st.markdown(
                         f'<div style="font-family:Inter,sans-serif; font-size:0.7rem; '
-                        f'color:#aaa; margin-bottom:0.5rem;">{price}{size_txt}</div>',
+                        f'color:#aaa; margin-bottom:0.6rem;">{price}{size_txt}</div>',
                         unsafe_allow_html=True
                     )
-                # 理由
-                reason = item.get("reason","")
-                if reason:
-                    st.markdown(
-                        f'<div style="font-family:Inter,sans-serif; font-size:0.72rem; '
-                        f'color:#777; line-height:1.5; margin-bottom:0.6rem;">{reason}</div>',
-                        unsafe_allow_html=True
-                    )
-                # 換件按鈕（純前端 index 切換，0 API calls）
-                if total > 1:
+                # 換掉這件按鈕
+                # Padres top（idx==0）固定是球衣，不提供換件
+                _is_padres = any(s in (user_sty or []) for s in ["Padres City Connect Jersey", "Padres Home Jersey"])
+                _lock_top  = (slot == "top" and idx == 0 and _is_padres)
+                if not _lock_top and total > 1:
                     swap_label = f"↺ 換一件{zh_label}" if lang_select == "繁體中文" else f"↺ Swap {en_label}"
                     if st.button(swap_label, key=f"swap_{slot}"):
                         new_idx = (idx + 1) % total
                         st.session_state["builder_idx"][slot] = new_idx
                         st.rerun()
+                elif _lock_top:
+                    st.markdown(
+                        f'<div style="font-family:Inter,sans-serif;font-size:0.62rem;'
+                        f'letter-spacing:2px;color:#aaa;text-transform:uppercase;'
+                        f'margin-top:0.3rem;">⚾ FIXED · PADRES</div>',
+                        unsafe_allow_html=True
+                    )
             else:
                 st.markdown(
                     f'<div style="font-family:Inter,sans-serif; font-size:0.78rem; '
-                    f'color:#ccc; padding:2rem 0;">暫無候補 / No options</div>',
+                    f'color:#ccc; padding:2rem 0;">—</div>',
                     unsafe_allow_html=True
                 )
 
     # ── 目前搭配摘要 ──
-    if builder_pool:
-        combo_parts = []
-        for s in ["top","pants","shoes"]:
-            opts = builder_pool.get(s,[])
-            idx  = builder_idx.get(s,0)
-            if opts and idx < len(opts):
-                combo_parts.append(opts[idx].get("name","?"))
-        if combo_parts:
-            combo_names = " + ".join(combo_parts)
-            st.markdown(
-                f'<div style="font-family:Inter,sans-serif; font-size:0.78rem; '
-                f'color:#555; margin-top:1rem; padding:0.8rem 1rem; '
-                f'background:#f9f9f9; border-left:2px solid #111;">'
-                f'✦ {combo_names}</div>',
-                unsafe_allow_html=True
-            )
+    if builder_items:
+        combo_names = " + ".join(
+            builder_items.get(s, {}).get("name", "?")
+            for s in ["top", "pants", "shoes"]
+            if builder_items.get(s)
+        )
+        st.markdown(
+            f'<div style="font-family:Inter,sans-serif; font-size:0.78rem; '
+            f'color:#555; margin-top:1rem; padding:0.8rem 1rem; '
+            f'background:#f9f9f9; border-left:2px solid #111;">'
+            f'✦ {combo_names}</div>',
+            unsafe_allow_html=True
+        )
 
     # ─────────────────────────────────────────────────────────────────
     # 方案 D：AI 穿搭圖生成（Pro 功能 · 付費意願追蹤）
