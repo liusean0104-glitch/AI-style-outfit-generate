@@ -177,12 +177,12 @@ if "_rec_cache" not in st.session_state:
 if "_last_gen_time" not in st.session_state:
     st.session_state["_last_gen_time"] = 0.0
 # 方案 E：Outfit Builder 狀態
-if "builder_items" not in st.session_state:
-    st.session_state["builder_items"] = {}   # {category: item_dict}
-if "builder_swapping" not in st.session_state:
-    st.session_state["builder_swapping"] = None  # 目前正在換哪個 category
+if "builder_pool" not in st.session_state:
+    st.session_state["builder_pool"] = {}   # {slot: [item, item, item]}
+if "builder_idx" not in st.session_state:
+    st.session_state["builder_idx"] = {"top":0,"pants":0,"shoes":0}
 if "pro_intent_clicked" not in st.session_state:
-    st.session_state["pro_intent_clicked"] = False  # 方案 D 付費意願追蹤
+    st.session_state["pro_intent_clicked"] = False
 
 # 2. 注入自定義 CSS (Minimalist Luxury / ZARA Aesthetic)
 st.markdown("""
@@ -524,18 +524,16 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
     if "Padres City Connect Jersey" in sty:
         specific_style_rule = (
             f"SPECIAL STYLE RULE: The user IS wearing a '{p_cc_name}' as the main top. "
-            f"In top_options, the FIRST item MUST be exactly: "
+            f"In your JSON response, the first item in 'zara_items' MUST be exactly: "
             f"{{\"name\": \"{p_cc_name}\", \"reason\": \"{p_cc_reason}\", \"category\": \"top\", \"price_range\": \"{p_price}\", \"recommended_size\": \"L\"}}. "
-            f"The 2nd and 3rd top_options should be ZARA items that layer well under/over a baseball jersey (e.g. inner tee, light jacket). "
-            f"For pants_options and shoes_options, suggest items matching the Padres City Connect jersey colorway."
+            f"Do NOT suggest any other main tops. Focus entirely on matching pants, shoes, and inner layers."
         )
     elif "Padres Home Jersey" in sty:
         specific_style_rule = (
             f"SPECIAL STYLE RULE: The user IS wearing a '{p_home_name}' as the main top. "
-            f"In top_options, the FIRST item MUST be exactly: "
+            f"In your JSON response, the first item in 'zara_items' MUST be exactly: "
             f"{{\"name\": \"{p_home_name}\", \"reason\": \"{p_home_reason}\", \"category\": \"top\", \"price_range\": \"{p_price}\", \"recommended_size\": \"L\"}}. "
-            f"The 2nd and 3rd top_options should be ZARA items that layer well under/over a baseball jersey (e.g. inner tee, light jacket). "
-            f"For pants_options and shoes_options, suggest items matching the Padres Home jersey colorway."
+            f"Do NOT suggest any other main tops. Focus entirely on matching pants, shoes, and inner layers."
         )
 
     custom_prompt_rule = ""
@@ -952,8 +950,14 @@ elif st.button(t["btn"]):
                 slot = "top" if "top" in cat else ("pants" if "pant" in cat or "skirt" in cat else ("shoes" if "shoe" in cat else cat))
                 if slot not in builder_init:
                     builder_init[slot] = item
-            st.session_state["builder_items"] = builder_init
-            st.session_state["builder_swapping"] = None
+            # builder_pool 初始化（換件候補池）
+            builder_pool_new = {
+                "top":   result.get("top_options",   []),
+                "pants": result.get("pants_options", []),
+                "shoes": result.get("shoes_options", []),
+            }
+            st.session_state["builder_pool"] = builder_pool_new
+            st.session_state["builder_idx"]  = {"top":0,"pants":0,"shoes":0}
 
             # ── 方案三：成功後存入 cache（僅限可快取請求）──
             if _is_cacheable and _cache_key:
@@ -1284,6 +1288,27 @@ def get_item_image(item_name: str, gender: str, category: str = "others",
 
 
 # ─── Results Display ──────────────────────────────────────────────────────────
+# 圖片預載：在 get_item_image 定義後執行，Builder 換件時 instant 切換
+if st.session_state.get("builder_pool"):
+    _primary_style = user_sty[0] if user_sty else "all"
+    _is_padres_pre = any(s in (user_sty or []) for s in ["Padres City Connect Jersey","Padres Home Jersey"])
+    for _slot, _opts in st.session_state["builder_pool"].items():
+        for _i, _item in enumerate(_opts):
+            _img_key = f"bimg_{_slot}_{_i}"
+            if _img_key not in st.session_state:
+                # Padres top 第一件：直接給 jersey URL，不走比對
+                if _slot == "top" and _i == 0 and _is_padres_pre:
+                    _name = _item.get("name","").lower()
+                    if "city connect" in _name or "城市限定" in _name:
+                        st.session_state[_img_key] = "https://i.postimg.cc/cLXyQZwy/city-connect.jpg"
+                    else:
+                        st.session_state[_img_key] = "https://i.postimg.cc/4xBkzZVC/home-jersey.avif"
+                else:
+                    st.session_state[_img_key] = get_item_image(
+                        _item.get("name",""), user_gender, _slot,
+                        style=_primary_style, season=user_season, occasion=user_occ
+                    )
+
 if st.session_state.last_result:
     res = st.session_state.last_result
     st.markdown("---")
@@ -1385,11 +1410,8 @@ if st.session_state.last_result:
                 f'color:#555; line-height:1.7; margin-bottom:1.5rem;">{reason}</div>',
                 unsafe_allow_html=True
             )
-            # ZARA gender-aware Discover button
-            # idx==0 + Padres 風格：第一件是球衣，不顯示 Discover 連結
-            _is_padres_style = any(s in (user_sty or []) for s in ["Padres City Connect Jersey", "Padres Home Jersey"])
-            _skip_discover = (idx == 0 and _is_padres_style)
-            if not _skip_discover:
+            # ZARA gender-aware Discover button (skip for Padres jerseys)
+            if "Padres" not in name_brand and "教士隊" not in name_brand:
                 search_query = urllib.parse.quote(name_brand)
                 section  = "MAN" if user_gender in ["Male", "男性"] else "WOMAN"
                 zara_url = f"https://www.zara.com/tw/zt/search?searchTerm={search_query}&section={section}"
@@ -1459,118 +1481,111 @@ if st.session_state.last_result:
         unsafe_allow_html=True
     )
 
-    builder_items = st.session_state.get("builder_items", {})
-    builder_swapping = st.session_state.get("builder_swapping")
+    builder_pool = st.session_state.get("builder_pool", {})
+    builder_idx  = st.session_state.get("builder_idx", {"top":0,"pants":0,"shoes":0})
 
-    SLOT_LABELS = {
-        "top":   ("上衣", "Top"),
-        "pants": ("下身", "Bottoms"),
-        "shoes": ("鞋子", "Shoes"),
-    }
-    SLOT_EMOJI = {"top": "👕", "pants": "👖", "shoes": "👟"}
+    SLOT_LABELS = {"top":("上衣","Top"), "pants":("下身","Bottoms"), "shoes":("鞋子","Shoes")}
+    SLOT_EMOJI  = {"top":"👕", "pants":"👖", "shoes":"👟"}
 
-    # ── 如果正在換某個 slot，先執行 API call ──
-    if builder_swapping:
-        with st.spinner(f"Finding a new {builder_swapping}..."):
-            locked = [v for k, v in builder_items.items() if k != builder_swapping]
-            new_item = get_single_item_swap(
-                category=builder_swapping,
-                locked_items=locked,
-                gender=user_gender, height=user_height, weight=user_weight,
-                season=user_season, occ=user_occ, wea=user_wea,
-                sty=user_sty, lang=lang_select
-            )
-            if new_item:
-                st.session_state["builder_items"][builder_swapping] = new_item
-                builder_items = st.session_state["builder_items"]
-            st.session_state["builder_swapping"] = None
+    # Padres 風格判斷
+    _is_padres_style = any(s in (user_sty or []) for s in ["Padres City Connect Jersey", "Padres Home Jersey"])
 
     # ── 顯示三個 slot ──
     slot_cols = st.columns(3)
-    for i, slot in enumerate(["top", "pants", "shoes"]):
-        item = builder_items.get(slot)
+    for i, slot in enumerate(["top","pants","shoes"]):
+        opts  = builder_pool.get(slot, [])
+        idx   = builder_idx.get(slot, 0)
+        item  = opts[idx] if opts else None
+        total = len(opts)
         zh_label, en_label = SLOT_LABELS[slot]
         slot_label = zh_label if lang_select == "繁體中文" else en_label
         emoji = SLOT_EMOJI[slot]
 
         with slot_cols[i]:
+            indicator = f" {idx+1}/{total}" if total > 1 else ""
             st.markdown(
                 f'<div style="font-family:Inter,sans-serif; font-size:0.65rem; '
                 f'letter-spacing:3px; color:#aaa; text-transform:uppercase; '
-                f'margin-bottom:0.5rem;">{emoji} {slot_label}</div>',
+                f'margin-bottom:0.5rem;">{emoji} {slot_label}{indicator}</div>',
                 unsafe_allow_html=True
             )
             if item:
-                # 圖片
-                builder_img_key = f"builder_img_{slot}"
-                if builder_img_key not in st.session_state:
-                    st.session_state[builder_img_key] = get_item_image(
-                        item.get("name",""), user_gender, slot,
-                        style=user_sty[0] if user_sty else "all",
-                        season=user_season, occasion=user_occ
-                    )
-                img_url = st.session_state.get(builder_img_key, "")
+                # 圖片：直接用 bimg_ cache（預載時已處理）
+                img_url = st.session_state.get(f"bimg_{slot}_{idx}", "")
+                # Padres top slot 第一件：強制用 jersey URL
+                if slot == "top" and idx == 0 and _is_padres_style:
+                    jersey_name = item.get("name","").lower()
+                    if "city connect" in jersey_name or "城市限定" in jersey_name:
+                        img_url = "https://i.postimg.cc/cLXyQZwy/city-connect.jpg"
+                    else:
+                        img_url = "https://i.postimg.cc/4xBkzZVC/home-jersey.avif"
                 if img_url:
                     st.markdown(
                         f'<div class="img-container" style="margin-bottom:0.6rem;">'
                         f'<img src="{img_url}"></div>',
                         unsafe_allow_html=True
                     )
-                # 品項名稱
                 st.markdown(
                     f'<div style="font-family:Inter,sans-serif; font-weight:600; '
                     f'font-size:0.82rem; margin-bottom:0.2rem; line-height:1.3;">'
                     f'{item.get("name","")}</div>',
                     unsafe_allow_html=True
                 )
-                # 價格 & 尺寸
                 price = item.get("price_range","")
                 size  = item.get("recommended_size","")
                 if price or size:
                     size_txt = f" · {size}" if size else ""
                     st.markdown(
                         f'<div style="font-family:Inter,sans-serif; font-size:0.7rem; '
-                        f'color:#aaa; margin-bottom:0.6rem;">{price}{size_txt}</div>',
+                        f'color:#aaa; margin-bottom:0.5rem;">{price}{size_txt}</div>',
                         unsafe_allow_html=True
                     )
-                # 換掉這件按鈕
-                # Padres top（idx==0）固定是球衣，不提供換件
-                _is_padres = any(s in (user_sty or []) for s in ["Padres City Connect Jersey", "Padres Home Jersey"])
-                _lock_top  = (slot == "top" and idx == 0 and _is_padres)
-                if not _lock_top and total > 1:
+                reason = item.get("reason","")
+                if reason:
+                    st.markdown(
+                        f'<div style="font-family:Inter,sans-serif; font-size:0.72rem; '
+                        f'color:#777; line-height:1.5; margin-bottom:0.6rem;">{reason}</div>',
+                        unsafe_allow_html=True
+                    )
+                # 換件按鈕：Padres top 第一件鎖定
+                _lock_top = (slot == "top" and idx == 0 and _is_padres_style)
+                if _lock_top:
+                    st.markdown(
+                        '<div style="font-family:Inter,sans-serif;font-size:0.62rem;'
+                        'letter-spacing:2px;color:#aaa;text-transform:uppercase;'
+                        'margin-top:0.3rem;">⚾ FIXED · PADRES</div>',
+                        unsafe_allow_html=True
+                    )
+                elif total > 1:
                     swap_label = f"↺ 換一件{zh_label}" if lang_select == "繁體中文" else f"↺ Swap {en_label}"
                     if st.button(swap_label, key=f"swap_{slot}"):
                         new_idx = (idx + 1) % total
                         st.session_state["builder_idx"][slot] = new_idx
                         st.rerun()
-                elif _lock_top:
-                    st.markdown(
-                        f'<div style="font-family:Inter,sans-serif;font-size:0.62rem;'
-                        f'letter-spacing:2px;color:#aaa;text-transform:uppercase;'
-                        f'margin-top:0.3rem;">⚾ FIXED · PADRES</div>',
-                        unsafe_allow_html=True
-                    )
             else:
                 st.markdown(
                     f'<div style="font-family:Inter,sans-serif; font-size:0.78rem; '
-                    f'color:#ccc; padding:2rem 0;">—</div>',
+                    f'color:#ccc; padding:2rem 0;">暫無候補 / No options</div>',
                     unsafe_allow_html=True
                 )
 
     # ── 目前搭配摘要 ──
-    if builder_items:
-        combo_names = " + ".join(
-            builder_items.get(s, {}).get("name", "?")
-            for s in ["top", "pants", "shoes"]
-            if builder_items.get(s)
-        )
-        st.markdown(
-            f'<div style="font-family:Inter,sans-serif; font-size:0.78rem; '
-            f'color:#555; margin-top:1rem; padding:0.8rem 1rem; '
-            f'background:#f9f9f9; border-left:2px solid #111;">'
-            f'✦ {combo_names}</div>',
-            unsafe_allow_html=True
-        )
+    if builder_pool:
+        combo_parts = []
+        for s in ["top","pants","shoes"]:
+            opts = builder_pool.get(s,[])
+            idx  = builder_idx.get(s,0)
+            if opts and idx < len(opts):
+                combo_parts.append(opts[idx].get("name","?"))
+        if combo_parts:
+            combo_names = " + ".join(combo_parts)
+            st.markdown(
+                f'<div style="font-family:Inter,sans-serif; font-size:0.78rem; '
+                f'color:#555; margin-top:1rem; padding:0.8rem 1rem; '
+                f'background:#f9f9f9; border-left:2px solid #111;">'
+                f'✦ {combo_names}</div>',
+                unsafe_allow_html=True
+            )
 
     # ─────────────────────────────────────────────────────────────────
     # 方案 D：AI 穿搭圖生成（Pro 功能 · 付費意願追蹤）
