@@ -385,6 +385,8 @@ st.markdown('<div class="section-label">User Behaviour Funnel</div>', unsafe_all
 
 sessions_with_rec      = len(set(r["session_id"] for r in recs))
 sessions_with_feedback = len(like_sessions | dislike_sessions)
+disc_rate          = round(sessions_clicked_disc / sessions_with_rec * 100) if sessions_with_rec else 0
+disc_sess_rate_val = round(sessions_clicked_disc / sessions_with_rec * 100) if sessions_with_rec else 0
 
 # 漏斗用 session 數（%不超過100%），Discover 改用次數另外展示
 funnel_steps = [
@@ -413,7 +415,6 @@ with col_i1:
     gen_rate  = round(sessions_with_rec / total_sessions * 100) if total_sessions else 0
     st.markdown(f'<div class="insight-box">生成轉換率 <b>{gen_rate}%</b>：每 100 個進入 App 的用戶中，有 {gen_rate} 個完成至少一次穿搭生成，顯示極高的 onboarding 完成率。</div>', unsafe_allow_html=True)
 with col_i2:
-    disc_sess_rate = round(sessions_clicked_disc / sessions_with_rec * 100) if sessions_with_rec else 0
     st.markdown(f'<div class="insight-box">🛍️ 購物意圖強烈：<b>{total_discovers}</b> 次 ZARA Discover 點擊，平均每次生成觸發 <b>{avg_discover_per_gen}</b> 次點擊。<b>{disc_sess_rate}%</b> 的用戶至少點了一個商品連結，代表從穿搭推薦到購物行為的直接轉化路徑。</div>', unsafe_allow_html=True)
 with col_i3:
     st.markdown(f'<div class="insight-box">🌏 國際市場信號：<b>{intl_sessions}</b> 位英文用戶（佔 <b>{intl_rate}%</b>）在未特別推廣的情況下自然進入 App，驗證產品具備跨語言市場潛力，為矽谷計劃提供直接佐證。</div>', unsafe_allow_html=True)
@@ -558,13 +559,12 @@ with col_b2:
     # 商業亮點 KPI
     st.markdown('<p style="font-family:DM Mono,monospace;font-size:0.6rem;letter-spacing:3px;color:#999;text-transform:uppercase;margin-bottom:0.8rem;">Key Business Metrics</p>', unsafe_allow_html=True)
     
-    disc_sess_rate_b = round(sessions_clicked_disc / sessions_with_rec * 100) if sessions_with_rec else 0
     revenue_proxy = total_discovers  # 每次 Discover 點擊 = 潛在購買意圖
     
     biz_metrics = [
         ("🛍️ ZARA Discover 總點擊", f"{total_discovers} 次", "購物意圖最直接指標"),
         ("📊 平均每次生成觸發 Discover", f"{avg_discover_per_gen} 次", "推薦→購物的轉化密度"),
-        ("👥 有 Discover 行為的用戶", f"{disc_sess_rate_b}%", "進入購物漏斗的比例"),
+        ("👥 有 Discover 行為的用戶", f"{disc_sess_rate_val}%", "進入購物漏斗的比例"),
         ("✨ Pro 功能付費意願", f"{total_pro_clicks} 人", "在無付費功能下的自發點擊"),
         ("📸 Photo Upload 深度使用", f"{photo_rate}%", "使用進階功能的核心用戶比例"),
     ]
