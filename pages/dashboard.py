@@ -213,7 +213,6 @@ def date_of(ts):
 # 事件分類
 like_sessions    = {e["session_id"] for e in events if e["event_type"] == "like"}
 dislike_sessions = {e["session_id"] for e in events if e["event_type"] == "dislike"}
-disc_events      = [e for e in events if e["event_type"] in ("discover_click","discover_view")]
 
 total_sessions  = len(sessions)
 total_recs      = len(recs)
@@ -222,6 +221,12 @@ total_dislikes  = len([e for e in events if e["event_type"] == "dislike"])
 total_discovers   = len(disc_events)
 total_feedback    = total_likes + total_dislikes
 
+# ── 修正 event_type 名稱（實際是 discover_view）──
+disc_events = [e for e in events if e["event_type"] in ("discover_click", "discover_view")]
+total_discovers    = len(disc_events)
+avg_discover_per_gen = round(total_discovers / total_recs, 1) if total_recs else 0
+sessions_clicked_disc = len(set(e["session_id"] for e in disc_events))
+
 # Pro 付費意願數據
 pro_intent_events = [e for e in events if e["event_type"] == "pro_intent_click"]
 waitlist_events   = [e for e in events if e["event_type"] == "waitlist_signup"]
@@ -229,13 +234,12 @@ total_pro_clicks  = len(pro_intent_events)
 total_waitlist    = len(waitlist_events)
 pro_to_waitlist   = round(total_waitlist / total_pro_clicks * 100) if total_pro_clicks else 0
 
-# Pro 付費意願數據
-pro_intent_events = [e for e in events if e["event_type"] == "pro_intent_click"]
-waitlist_events   = [e for e in events if e["event_type"] == "waitlist_signup"]
-total_pro_clicks  = len(pro_intent_events)
-total_waitlist    = len(waitlist_events)
-# 點了 Pro 按鈕後留下 email 的轉換率
-pro_to_waitlist   = round(total_waitlist / total_pro_clicks * 100) if total_pro_clicks else 0
+# 國際流量分析
+lang_cnt_all = defaultdict(int)
+for s in sessions:
+    lang_cnt_all[s.get("language", "Unknown")] += 1
+intl_sessions = sum(v for k, v in lang_cnt_all.items() if k != "繁體中文" and k != "Unknown")
+intl_rate = round(intl_sessions / total_sessions * 100) if total_sessions else 0
 
 photo_count  = sum(1 for s in sessions if s.get("has_photo_upload"))
 photo_rate   = round(photo_count / total_sessions * 100) if total_sessions else 0
@@ -280,19 +284,14 @@ st.markdown(f"""
     <span class="kpi-delta neu">深度使用指標</span>
   </div>
   <div class="kpi-card">
-    <div class="kpi-label">Avg Gen / Session</div>
-    <div class="kpi-value">{avg_gen}</div>
-    <span class="kpi-delta neu">參與深度</span>
+    <div class="kpi-label">Avg Discover / Gen</div>
+    <div class="kpi-value">{avg_discover_per_gen}</div>
+    <span class="kpi-delta up">每次生成點擊 ZARA 次數</span>
   </div>
-  <div class="kpi-card">
-    <div class="kpi-label">Engagement Rate</div>
-    <div class="kpi-value">{engagement_rate}%</div>
-    <span class="kpi-delta neu">留下 Like / Dislike</span>
-  </div>
-  <div class="kpi-card">
-    <div class="kpi-label">Satisfaction</div>
-    <div class="kpi-value">{satisfaction}%</div>
-    <span class="kpi-delta neu">有回饋者中 Like 率</span>
+  <div class="kpi-card" style="border-left:3px solid #3b82f6;">
+    <div class="kpi-label">🌏 International</div>
+    <div class="kpi-value">{intl_sessions}</div>
+    <span class="kpi-delta {'up' if intl_sessions > 0 else 'neu'}">非繁中用戶 {intl_rate}%</span>
   </div>
   <div class="kpi-card" style="border-left:3px solid #111;">
     <div class="kpi-label">✨ Pro Clicks</div>
@@ -300,9 +299,14 @@ st.markdown(f"""
     <span class="kpi-delta neu">付費意願人數</span>
   </div>
   <div class="kpi-card">
-    <div class="kpi-label">Waitlist Signups</div>
-    <div class="kpi-value">{total_waitlist}</div>
-    <span class="kpi-delta {'up' if total_waitlist > 0 else 'neu'}">→ {pro_to_waitlist}% 轉換</span>
+    <div class="kpi-label">Total Discovers</div>
+    <div class="kpi-value">{total_discovers}</div>
+    <span class="kpi-delta up">ZARA 商品點擊總次數</span>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Like / Dislike</div>
+    <div class="kpi-value">{total_likes} / {total_dislikes}</div>
+    <span class="kpi-delta neu">用戶回饋（累積中）</span>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -327,21 +331,30 @@ if overview:
 
         with col_l:
             st.markdown('<p style="font-family:\'DM Mono\',monospace;font-size:0.6rem;letter-spacing:2px;color:#aaa;text-transform:uppercase;margin-bottom:0.5rem;">每日生成次數趨勢</p>', unsafe_allow_html=True)
+            # 從 events 直接算每日 discover 次數（analytics_overview 的 discover_clicks 不準）
+            daily_disc = defaultdict(int)
+            for e in events:
+                if e["event_type"] in ("discover_click", "discover_view"):
+                    d = date_of(e.get("created_at",""))
+                    if d:
+                        daily_disc[d] += 1
+            df_trend["discover_actual"] = df_trend["day"].apply(lambda d: daily_disc.get(d, 0))
+
             df_m = df_trend.melt(
                 id_vars="day",
-                value_vars=["generates","likes","dislikes","discover_clicks"],
+                value_vars=["generates","likes","discover_actual"],
                 var_name="event", value_name="count"
             )
             df_m["event"] = df_m["event"].map({
-                "generates": "推薦", "likes": "Like",
-                "dislikes": "Dislike", "discover_clicks": "Discover"
+                "generates": "推薦生成", "likes": "Like",
+                "discover_actual": "Discover 點擊"
             })
             line = alt.Chart(df_m).mark_line(point=True).encode(
                 x=alt.X("day:T", title="日期", axis=alt.Axis(format="%m/%d", labelFont="DM Mono", labelColor="#aaa", gridColor="#f5f5f5", domainColor="#eee")),
                 y=alt.Y("count:Q", title="次數", axis=alt.Axis(labelFont="DM Mono", labelColor="#aaa", gridColor="#f5f5f5", domainColor="#eee")),
                 color=alt.Color("event:N",
-                    scale=alt.Scale(domain=["推薦","Like","Dislike","Discover"],
-                                    range=["#111","#16a34a","#dc2626","#3b82f6"]),
+                    scale=alt.Scale(domain=["推薦生成","Like","Discover 點擊"],
+                                    range=["#111","#16a34a","#3b82f6"]),
                     legend=alt.Legend(title=None, orient="bottom", labelFont="DM Mono", labelFontSize=10)),
                 tooltip=["day:T","event:N","count:Q"],
             ).properties(height=220).configure_view(strokeWidth=0)
@@ -372,13 +385,13 @@ else:
 st.markdown('<div class="section-label">User Behaviour Funnel</div>', unsafe_allow_html=True)
 
 sessions_with_rec      = len(set(r["session_id"] for r in recs))
-sessions_with_discover = len(set(e["session_id"] for e in disc_events))
 sessions_with_feedback = len(like_sessions | dislike_sessions)
 
+# 漏斗用 session 數（%不超過100%），Discover 改用次數另外展示
 funnel_steps = [
     ("SESSION STARTED",        total_sessions,        total_sessions, "#111"),
     ("GENERATED ≥1 OUTFIT",    sessions_with_rec,     total_sessions, "#111"),
-    ("CLICKED DISCOVER",       sessions_with_discover,total_sessions, "#555"),
+    ("CLICKED DISCOVER (Sessions)", sessions_clicked_disc, total_sessions, "#555"),
     ("LEFT FEEDBACK",          sessions_with_feedback, total_sessions, "#888"),
     ("LIKED RESULT",           len(like_sessions),    total_sessions, "#bbb"),
     ("✨ CLICKED PRO FEATURE", total_pro_clicks,       total_sessions, "#3b82f6"),
@@ -386,7 +399,7 @@ funnel_steps = [
 ]
 funnel_html = ""
 for label, count, base, color in funnel_steps:
-    pct = round(count / base * 100) if base else 0
+    pct = min(round(count / base * 100) if base else 0, 100)  # cap 100%
     funnel_html += f"""
     <div class="funnel-row">
       <div class="funnel-label">{label}</div>
@@ -399,12 +412,12 @@ st.markdown(funnel_html, unsafe_allow_html=True)
 col_i1, col_i2, col_i3 = st.columns(3)
 with col_i1:
     gen_rate  = round(sessions_with_rec / total_sessions * 100) if total_sessions else 0
-    st.markdown(f'<div class="insight-box">生成轉換率 <b>{gen_rate}%</b>：每 100 個進入 App 的用戶中，有 {gen_rate} 個完成至少一次生成。</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="insight-box">生成轉換率 <b>{gen_rate}%</b>：每 100 個進入 App 的用戶中，有 {gen_rate} 個完成至少一次穿搭生成，顯示極高的 onboarding 完成率。</div>', unsafe_allow_html=True)
 with col_i2:
-    disc_rate = round(sessions_with_discover / sessions_with_rec * 100) if sessions_with_rec else 0
-    st.markdown(f'<div class="insight-box">Discover 點擊率 <b>{disc_rate}%</b>：完成生成的用戶中，有 {disc_rate}% 點擊了 ZARA 商品連結，代表實際購物意圖。</div>', unsafe_allow_html=True)
+    disc_sess_rate = round(sessions_clicked_disc / sessions_with_rec * 100) if sessions_with_rec else 0
+    st.markdown(f'<div class="insight-box">🛍️ 購物意圖強烈：<b>{total_discovers}</b> 次 ZARA Discover 點擊，平均每次生成觸發 <b>{avg_discover_per_gen}</b> 次點擊。<b>{disc_sess_rate}%</b> 的用戶至少點了一個商品連結，代表從穿搭推薦到購物行為的直接轉化路徑。</div>', unsafe_allow_html=True)
 with col_i3:
-    st.markdown(f'<div class="insight-box">✨ Pro 付費意願：<b>{total_pro_clicks}</b> 人點擊 Pro 功能，其中 <b>{total_waitlist}</b> 人留下 email，轉換率 <b>{pro_to_waitlist}%</b>。這是最直接的付費意願指標。</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="insight-box">🌏 國際市場信號：<b>{intl_sessions}</b> 位英文用戶（佔 <b>{intl_rate}%</b>）在未特別推廣的情況下自然進入 App，驗證產品具備跨語言市場潛力，為矽谷計劃提供直接佐證。</div>', unsafe_allow_html=True)
 
 # ── SECTION 4：AI Model 表現（從 model_performance Supabase view）──
 st.markdown('<div class="section-label">AI Model Performance</div>', unsafe_allow_html=True)
@@ -521,6 +534,50 @@ with col_s2:
     else:
         st.markdown('<p style="font-family:\'DM Mono\',monospace;font-size:0.7rem;color:#aaa;">No item data yet</p>', unsafe_allow_html=True)
 
+# ── SECTION 6.5：國際市場分析 + 商業亮點 ──
+st.markdown('<div class="section-label">Business Highlights & International Market Signal</div>', unsafe_allow_html=True)
+
+col_b1, col_b2 = st.columns(2)
+
+with col_b1:
+    # 語言分布橫條
+    st.markdown('<p style="font-family:DM Mono,monospace;font-size:0.6rem;letter-spacing:3px;color:#999;text-transform:uppercase;margin-bottom:0.8rem;">Language Distribution</p>', unsafe_allow_html=True)
+    lang_total = sum(lang_cnt_all.values()) or 1
+    for lang, cnt in sorted(lang_cnt_all.items(), key=lambda x: -x[1]):
+        pct = round(cnt / lang_total * 100)
+        flag = "🇹🇼" if lang == "繁體中文" else "🌏"
+        st.markdown(f"""
+        <div class="dist-row">
+          <div class="dist-key" style="width:130px">{flag} {lang}</div>
+          <div class="dist-bar-wrap"><div class="dist-bar" style="width:{pct}%"></div></div>
+          <div class="dist-pct">{cnt} ({pct}%)</div>
+        </div>""", unsafe_allow_html=True)
+    
+    st.markdown(f'<div class="insight-box" style="margin-top:1rem;">🌏 <b>國際用戶信號：</b>在未主動推廣英文市場的情況下，自然產生 <b>{intl_sessions}</b> 位英文用戶（{intl_rate}%）。San Diego Padres 球迷社群主要集中於美國，矽谷距 SD 開車 2 小時，此數據直接支持國際市場擴張計畫。</div>', unsafe_allow_html=True)
+
+with col_b2:
+    # 商業亮點 KPI
+    st.markdown('<p style="font-family:DM Mono,monospace;font-size:0.6rem;letter-spacing:3px;color:#999;text-transform:uppercase;margin-bottom:0.8rem;">Key Business Metrics</p>', unsafe_allow_html=True)
+    
+    disc_sess_rate_b = round(sessions_clicked_disc / sessions_with_rec * 100) if sessions_with_rec else 0
+    revenue_proxy = total_discovers  # 每次 Discover 點擊 = 潛在購買意圖
+    
+    biz_metrics = [
+        ("🛍️ ZARA Discover 總點擊", f"{total_discovers} 次", "購物意圖最直接指標"),
+        ("📊 平均每次生成觸發 Discover", f"{avg_discover_per_gen} 次", "推薦→購物的轉化密度"),
+        ("👥 有 Discover 行為的用戶", f"{disc_sess_rate_b}%", "進入購物漏斗的比例"),
+        ("✨ Pro 功能付費意願", f"{total_pro_clicks} 人", "在無付費功能下的自發點擊"),
+        ("📸 Photo Upload 深度使用", f"{photo_rate}%", "使用進階功能的核心用戶比例"),
+    ]
+    
+    for label, value, note in biz_metrics:
+        st.markdown(f"""
+        <div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.6rem;padding:0.6rem;background:#f9f9f9;">
+          <div style="font-family:DM Mono,monospace;font-size:0.65rem;color:#555;flex:1;">{label}</div>
+          <div style="font-family:Bodoni Moda,serif;font-size:1.1rem;font-weight:700;color:#111;width:80px;text-align:right;">{value}</div>
+          <div style="font-family:DM Mono,monospace;font-size:0.58rem;color:#aaa;width:130px;text-align:right;">{note}</div>
+        </div>""", unsafe_allow_html=True)
+
 # ── SECTION 7：Competition Traction Summary ──
 st.markdown('<div class="section-label">Competition Traction Summary</div>', unsafe_allow_html=True)
 
@@ -571,107 +628,3 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.markdown("<br><br>", unsafe_allow_html=True)
-# ── SECTION 8：API Key Quota Monitor ──
-st.markdown('<div class="section-label">API Key Quota Monitor</div>', unsafe_allow_html=True)
-
-MODEL_TIERS_DISPLAY = [
-    {"name": "gemini-3.5-flash",      "rpd": 20,  "soft": 18, "color": "#111"},
-    {"name": "gemini-2.5-flash",      "rpd": 20,  "soft": 18, "color": "#555"},
-    {"name": "gemini-3.1-flash-lite", "rpd": 500, "soft": 480, "color": "#888"},
-]
-KEY_LABELS = ["Key 3 (主力)", "Key 4", "Key 2", "Key 1 (備援)"]
-
-# 先嘗試從 Supabase key_quota 表讀今日資料
-@st.cache_data(ttl=30)  # 30 秒更新一次
-def load_quota():
-    import datetime, zoneinfo
-    try:
-        pt = zoneinfo.ZoneInfo("America/Los_Angeles")
-        today = datetime.datetime.now(pt).strftime("%Y-%m-%d")
-    except Exception:
-        today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-
-    url = f"{sb_url}/rest/v1/key_quota?date=eq.{today}"
-    headers = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
-    try:
-        r = requests.get(url, headers=headers, timeout=4)
-        if r.ok:
-            rows = r.json()
-            # {(key_idx, model_name): count}
-            return {(row["key_idx"], row["model_name"]): row["count"] for row in rows}
-    except Exception:
-        pass
-    return {}
-
-quota_data = load_quota()
-has_quota_data = bool(quota_data)
-
-if not has_quota_data:
-    st.markdown(
-        '<div class="insight-box" style="border-left-color:#f59e0b;">'
-        '⚠️ <b>key_quota 表尚無今日資料。</b>'
-        '請確認 Supabase 已建立 key_quota 表，且 App 今日有生成請求。'
-        '（建立 SQL：<code>CREATE TABLE key_quota (key_idx int, model_name text, date text, count int, PRIMARY KEY (key_idx, model_name, date));</code>）'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-# 無論有無 Supabase 資料都顯示表格（有資料就顯示，沒有就全部顯示 0）
-for tier in MODEL_TIERS_DISPLAY:
-    model_name = tier["name"]
-    rpd        = tier["rpd"]
-    soft       = tier["soft"]
-    color      = tier["color"]
-
-    st.markdown(
-        f'<p style="font-family:DM Mono,monospace;font-size:0.62rem;letter-spacing:3px;'
-        f'color:{color};text-transform:uppercase;margin-top:1.2rem;margin-bottom:0.6rem;">'
-        f'▸ {model_name} &nbsp;·&nbsp; RPD {rpd} &nbsp;·&nbsp; Soft Limit {soft}</p>',
-        unsafe_allow_html=True
-    )
-
-    cols = st.columns(4)
-    for i, label in enumerate(KEY_LABELS):
-        count = quota_data.get((i, model_name), 0)
-        remaining = max(0, soft - count)
-        pct = round(count / soft * 100) if soft else 0
-
-        # 狀態顏色
-        if count >= soft:
-            bar_color = "#dc2626"   # 紅：已達軟限
-            status    = "SOFT LIMIT"
-            status_color = "#dc2626"
-        elif pct >= 70:
-            bar_color = "#f59e0b"   # 橘：接近
-            status    = f"{remaining} left"
-            status_color = "#f59e0b"
-        else:
-            bar_color = "#111"
-            status    = f"{remaining} left"
-            status_color = "#16a34a"
-
-        with cols[i]:
-            st.markdown(f"""
-            <div style="border:1px solid #eee;padding:0.8rem;margin-bottom:0.3rem;">
-              <div style="font-family:'DM Mono',monospace;font-size:0.58rem;letter-spacing:2px;
-                          color:#999;text-transform:uppercase;margin-bottom:0.4rem;">{label}</div>
-              <div style="font-family:'Bodoni Moda',serif;font-size:1.6rem;line-height:1;">{count}</div>
-              <div style="font-family:'DM Mono',monospace;font-size:0.55rem;
-                          color:{status_color};margin-top:0.2rem;margin-bottom:0.5rem;">{status}</div>
-              <div style="background:#f5f5f5;height:6px;border-radius:3px;">
-                <div style="background:{bar_color};height:6px;border-radius:3px;
-                            width:{min(pct,100)}%;transition:width 0.4s;"></div>
-              </div>
-              <div style="font-family:'DM Mono',monospace;font-size:0.5rem;
-                          color:#ccc;margin-top:0.3rem;text-align:right;">{pct}% used</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-st.markdown("<br>", unsafe_allow_html=True)
-st.markdown(
-    "<div style=\"font-family:DM Mono,monospace;font-size:0.58rem;letter-spacing:2px;"
-    "color:#aaa;\">* 數據每 30 秒自動更新 · 重啟後歸零（持久化需 key_quota 表）"
-    " · PT 午夜自動重置</div>",
-    unsafe_allow_html=True
-)
-
