@@ -415,7 +415,7 @@ with col_i1:
     gen_rate  = round(sessions_with_rec / total_sessions * 100) if total_sessions else 0
     st.markdown(f'<div class="insight-box">生成轉換率 <b>{gen_rate}%</b>：每 100 個進入 App 的用戶中，有 {gen_rate} 個完成至少一次穿搭生成，顯示極高的 onboarding 完成率。</div>', unsafe_allow_html=True)
 with col_i2:
-    st.markdown(f'<div class="insight-box">🛍️ 購物意圖強烈：<b>{total_discovers}</b> 次 ZARA Discover 點擊，平均每次生成觸發 <b>{avg_discover_per_gen}</b> 次點擊。<b>{disc_sess_rate}%</b> 的用戶至少點了一個商品連結，代表從穿搭推薦到購物行為的直接轉化路徑。</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="insight-box">🛍️ 購物意圖強烈：<b>{total_discovers}</b> 次 ZARA Discover 點擊，平均每次生成觸發 <b>{avg_discover_per_gen}</b> 次點擊。<b>{disc_sess_rate_val}%</b> 的用戶至少點了一個商品連結，代表從穿搭推薦到購物行為的直接轉化路徑。</div>', unsafe_allow_html=True)
 with col_i3:
     st.markdown(f'<div class="insight-box">🌏 國際市場信號：<b>{intl_sessions}</b> 位英文用戶（佔 <b>{intl_rate}%</b>）在未特別推廣的情況下自然進入 App，驗證產品具備跨語言市場潛力，為矽谷計劃提供直接佐證。</div>', unsafe_allow_html=True)
 
