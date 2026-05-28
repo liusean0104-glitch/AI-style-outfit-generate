@@ -218,7 +218,6 @@ total_sessions  = len(sessions)
 total_recs      = len(recs)
 total_likes     = len([e for e in events if e["event_type"] == "like"])
 total_dislikes  = len([e for e in events if e["event_type"] == "dislike"])
-total_discovers   = len(disc_events)
 total_feedback    = total_likes + total_dislikes
 
 # ── 修正 event_type 名稱（實際是 discover_view）──
