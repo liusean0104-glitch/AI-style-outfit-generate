@@ -627,3 +627,92 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.markdown("<br><br>", unsafe_allow_html=True)
+# ── SECTION 8：API Key Quota Monitor ──
+st.markdown('<div class="section-label">API Key Quota Monitor</div>', unsafe_allow_html=True)
+
+MODEL_TIERS_DISPLAY = [
+    {"name": "gemini-3.5-flash",      "rpd": 20,  "soft": 18, "color": "#111"},
+    {"name": "gemini-2.5-flash",      "rpd": 20,  "soft": 18, "color": "#555"},
+    {"name": "gemini-3.1-flash-lite", "rpd": 500, "soft": 480, "color": "#888"},
+]
+KEY_LABELS = ["Key 3 (主力)", "Key 4", "Key 2", "Key 1 (備援)"]
+
+@st.cache_data(ttl=30)
+def load_quota():
+    import datetime, zoneinfo
+    try:
+        pt = zoneinfo.ZoneInfo("America/Los_Angeles")
+        today_str = datetime.datetime.now(pt).strftime("%Y-%m-%d")
+    except Exception:
+        today_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    url = f"{sb_url}/rest/v1/key_quota?date=eq.{today_str}"
+    headers = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
+    try:
+        r = requests.get(url, headers=headers, timeout=4)
+        if r.ok:
+            rows = r.json()
+            return {(row["key_idx"], row["model_name"]): row["count"] for row in rows}
+    except Exception:
+        pass
+    return {}
+
+quota_data = load_quota()
+has_quota_data = bool(quota_data)
+
+if not has_quota_data:
+    st.markdown(
+        '<div class="insight-box" style="border-left-color:#f59e0b;">'
+        '⚠️ <b>key_quota 表尚無今日資料。</b> App 今日尚未有生成請求，或資料尚未寫入。'
+        '</div>',
+        unsafe_allow_html=True
+    )
+
+for tier in MODEL_TIERS_DISPLAY:
+    model_name = tier["name"]
+    rpd        = tier["rpd"]
+    soft       = tier["soft"]
+    color      = tier["color"]
+
+    st.markdown(
+        f'<p style="font-family:DM Mono,monospace;font-size:0.62rem;letter-spacing:3px;'
+        f'color:{color};text-transform:uppercase;margin-top:1.2rem;margin-bottom:0.6rem;">'
+        f'▸ {model_name} &nbsp;·&nbsp; RPD {rpd} &nbsp;·&nbsp; Soft Limit {soft}</p>',
+        unsafe_allow_html=True
+    )
+
+    cols = st.columns(4)
+    for i, label in enumerate(KEY_LABELS):
+        count = quota_data.get((i, model_name), 0)
+        remaining = max(0, soft - count)
+        pct = round(count / soft * 100) if soft else 0
+
+        if count >= soft:
+            bar_color, status, status_color = "#dc2626", "SOFT LIMIT", "#dc2626"
+        elif pct >= 70:
+            bar_color, status, status_color = "#f59e0b", f"{remaining} left", "#f59e0b"
+        else:
+            bar_color, status, status_color = "#111", f"{remaining} left", "#16a34a"
+
+        with cols[i]:
+            st.markdown(f"""
+            <div style="border:1px solid #eee;padding:0.8rem;margin-bottom:0.3rem;">
+              <div style="font-family:DM Mono,monospace;font-size:0.58rem;letter-spacing:2px;
+                          color:#999;text-transform:uppercase;margin-bottom:0.4rem;">{label}</div>
+              <div style="font-family:Bodoni Moda,serif;font-size:1.6rem;line-height:1;">{count}</div>
+              <div style="font-family:DM Mono,monospace;font-size:0.55rem;
+                          color:{status_color};margin-top:0.2rem;margin-bottom:0.5rem;">{status}</div>
+              <div style="background:#f5f5f5;height:6px;border-radius:3px;">
+                <div style="background:{bar_color};height:6px;border-radius:3px;
+                            width:{min(pct,100)}%;"></div>
+              </div>
+              <div style="font-family:DM Mono,monospace;font-size:0.5rem;
+                          color:#ccc;margin-top:0.3rem;text-align:right;">{pct}% used</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+st.markdown(
+    '<div style="font-family:DM Mono,monospace;font-size:0.58rem;letter-spacing:2px;'
+    'color:#aaa;margin-top:0.5rem;">* 每 30 秒自動更新 · PT 午夜重置 · 重啟後從 Supabase 還原</div>',
+    unsafe_allow_html=True
+)
+
