@@ -10,7 +10,6 @@ import random
 import requests
 import asyncio
 import time
-from duckduckgo_search import DDGS
 
 # 1. 載入與設定
 load_dotenv(override=True)
@@ -1270,6 +1269,14 @@ elif st.button(t["btn"]):
             st.session_state["builder_pool"] = builder_pool_new
             st.session_state["builder_idx"]  = {"top":0,"pants":0,"shoes":0}
 
+            # ── Image Engine v3：同步生成 3 件主要單品圖（並行，~5-10s）──
+            # 候補池其他單品 lazy：swap 時才生成，省 quota
+            _main_names = [it.get("name", "") for it in result.get("zara_items", [])]
+            _gen_style = user_sty[0] if user_sty else "all"
+            with st.spinner("正在生成商品圖..." if lang_select == "繁體中文"
+                            else "Generating product visuals..."):
+                ensure_item_images(_main_names, user_gender, _gen_style)
+
             # ── 方案三：成功後存入 cache（僅限可快取請求）──
             if _is_cacheable and _cache_key:
                 _cache_set(_cache_key, result)
@@ -1309,312 +1316,122 @@ elif st.button(t["btn"]):
                                                     "email": st.session_state["user_email"],
                                                     "prefs": _new_prefs}
 
-# ─── Image Engine ──────────────────────────────────────────────────────────
+# ─── Image Engine v3：Imagen 4 Fast 生成式商品圖 ───────────────────────────
+# 設計：外鏈 URL 與 RAW_DATA 比對全面退役。
+#   每個單品名稱「全域只生成一次」→ 上傳 Supabase Storage → 寫 item_image_cache，
+#   之後所有用戶、所有 session 都直接吃自家 CDN。
+#   Quota：imagen-4.0-fast 每把 key 25 RPD × 4 keys ≈ 100 張/天，
+#   目錄飽和後新生成需求趨近於零。
+# 例外：Padres 球衣是真實特定商品，維持 pinned 圖（不交給生成模型）。
 
-# ── RAW_DATA：服裝單品清單（URL + 屬性）────────────────────────────────────
-# 格式：{"name": str, "url": str, "gender": str, "style": str,
-#        "season": str, "occasion": str, "category": str}
-# gender / style / season / occasion 皆可為 "all" 表示萬用
-RAW_DATA = [
-    # ── Padres Special ─────────────────────────────────────────
-    {"name": "Padres Home Jersey",      "url": "https://i.postimg.cc/4xBkzZVC/home-jersey.avif",
-     "gender": "all", "style": "padres home jersey", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "Padres Jeans",            "url": "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
-     "gender": "all", "style": "padres home jersey", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "Padres Sneakers",         "url": "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
-     "gender": "all", "style": "padres home jersey", "season": "all", "occasion": "all", "category": "shoes"},
+IMAGE_MODEL_NAME = "imagen-4.0-fast-generate-001"
+IMAGE_RPD_SOFT_LIMIT = 23   # RPD=25，留 2 緩衝
 
-    {"name": "Padres City Connect Jersey", "url": "https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
-     "gender": "all", "style": "padres city connect jersey", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "Padres CC Jeans",         "url": "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
-     "gender": "all", "style": "padres city connect jersey", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "Padres CC Sneakers",      "url": "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
-     "gender": "all", "style": "padres city connect jersey", "season": "all", "occasion": "all", "category": "shoes"},
+# 新版 google-genai SDK（Imagen 不走舊 google.generativeai）
+try:
+    from google import genai as genai_new
+    from google.genai import types as genai_types
+    _IMAGEN_AVAILABLE = True
+except ImportError:
+    _IMAGEN_AVAILABLE = False
+    print("[Imagen] google-genai 未安裝，圖片生成停用（pip install google-genai）")
 
-    # ── Korean Style ───────────────────────────────────────────
-    {"name": "亞麻混紡寬版襯衫",        "url": "https://static.zara.net/assets/public/929f/7db7/8b134105881c/93f90f300c43/04391202251-e1/04391202251-e1.jpg?ts=1776675963894&w=750",
-     "gender": "all", "style": "korean style", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "西裝長褲",                "url": "https://i.postimg.cc/JzYhw827/xi-zhuang-zhang-ku.jpg",
-     "gender": "all", "style": "korean style", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "西裝外套",                "url": "https://static.zara.net/assets/public/77a3/aae9/7cdb4a779845/6bd338dda377/03548117505-e1/03548117505-e1.jpg?ts=1771492805494&w=750",
-     "gender": "all", "style": "korean style", "season": "all", "occasion": "all", "category": "others"},
-    {"name": "大衣",                    "url": "https://static.zara.net/assets/public/335a/4ba1/7fa649178479/013a090cd3e9/09330896730-e1/09330896730-e1.jpg?ts=1763624004198&w=750",
-     "gender": "all", "style": "korean style", "season": "all", "occasion": "all", "category": "others"},
-    {"name": "毛衣",                    "url": "https://static.zara.net/assets/public/47a8/0b53/66174400aeed/bc0ec06d656d/03920490704-e1/03920490704-e1.jpg?ts=1769507794726&w=750",
-     "gender": "all", "style": "korean style", "season": "all", "occasion": "all", "category": "others"},
-
-    # ── Legacy / General items (preserved from old dict) ───────
-    {"name": "linen blend oversize shirt", "url": "https://i.postimg.cc/Zq954QGz/kuan-song-chen-shan.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "man jeans",               "url": "https://i.postimg.cc/Sx1K04t3/niu-zi-ku.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "white t-shirt",           "url": "https://i.postimg.cc/vZ2mRyNR/bai-se-T-Shirt.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "canvas sneaker",          "url": "https://i.postimg.cc/qvD7fr50/bai-se-fan-bu-xie.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "shoes"},
-    {"name": "wide leg trouser",        "url": "https://i.postimg.cc/x1pdrQ41/kuan-xi-zhuang-zhang-ku.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "loafer",                  "url": "https://i.postimg.cc/qvD7fr5p/pi-le-fu-xie.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "shoes"},
-    {"name": "polo shirt",              "url": "https://i.postimg.cc/fRqb4sgr/polo-shan.jpg",
-     "gender": "male", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
-
-    {"name": "wide leg pant",           "url": "https://i.postimg.cc/0y7qns1n/nu-kuan-ku.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "linen blend trouser",     "url": "https://i.postimg.cc/kG9nXsWG/Linen-Blend-Trousers.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "sleeveless satin blouse", "url": "https://i.postimg.cc/gjDGwhKn/Sleeveless-Satin-Blouse.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "midi skirt",              "url": "https://i.postimg.cc/4N6W95VN/Satin-Midi-Skirt.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "woman jean",              "url": "https://i.postimg.cc/d11XbMp6/nu-niu-zi-ku.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "pants"},
-    {"name": "ribbed t-shirt",          "url": "https://i.postimg.cc/766cFvdV/nu-luo-wen-duan-xiu-T-shirt.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "crop t-shirt",            "url": "https://i.postimg.cc/GhwRy2Zy/duan-ban-Tshirt.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "strappy heeled sandal",   "url": "https://i.postimg.cc/X7J8DbyL/Strappy-Heeled-Sandals.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "shoes"},
-    {"name": "cropped linen blend shirt", "url": "https://i.postimg.cc/Qxtbn3WS/women-Cropped-Linen-Blend-Shirt.jpg",
-     "gender": "female", "style": "all", "season": "all", "occasion": "all", "category": "tops"},
-    # ── 新增競賽用單品 ──
-    {"name": "紋理針織POLO衫", "url": "https://static.zara.net/assets/public/ea9b/6ad1/1fe04f5294ee/4550e91b144a/06771409725-e1/06771409725-e1.jpg?ts=1775027129089&w=750",
-     "gender": "male", "style": "korean style", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "亞麻混紡寬鬆短袖襯衫", "url": "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
-     "gender": "male", "style": "korean style", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "白色球鞋", "url": "https://static.zara.net/assets/public/8dd7/c670/40b047c68246/c739d76bde81/15037710002-e1/15037710002-e1.jpg?ts=1771515859118&w=1024",
-     "gender": "male", "style": "korean style", "season": "all", "occasion": "all", "category": "shoes"},
-    {"name": "印花短版上衣", "url": "https://static.zara.net/assets/public/6a57/85f0/b1de4a47998d/870944fff272/06224858016-e2/06224858016-e2.jpg?ts=1775747112321&w=750",
-     "gender": "female", "style": "streetwear", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "府綢寬鬆襯衫", "url": "https://static.zara.net/assets/public/2445/941b/a21441cca03e/6ac162b87051/01096289251-e1/01096289251-e1.jpg?ts=1771926772874&w=750",
-     "gender": "female", "style": "streetwear", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "亞麻混紡開襟短袖襯衫", "url": "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
-     "gender": "male", "style": "streetwear", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "寬鬆版印花T shirt", "url": "https://static.zara.net/assets/public/6a57/85f0/b1de4a47998d/870944fff272/06224858016-e2/06224858016-e2.jpg?ts=1775747112321&w=750",
-     "gender": "male", "style": "streetwear", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "針織POLO衫", "url": "https://static.zara.net/assets/public/ea9b/6ad1/1fe04f5294ee/4550e91b144a/06771409725-e1/06771409725-e1.jpg?ts=1775027129089&w=750",
-     "gender": "male", "style": "old money", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "亞麻混紡休閒襯衫", "url": "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
-     "gender": "male", "style": "old money", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "合身基本款棉質T shirt", "url": "https://static.zara.net/assets/public/919a/0d64/18ab4209ad1f/e0daff2808bf/02621413250-e1/02621413250-e1.jpg?ts=1774258002473&w=750",
-     "gender": "male", "style": "minimalist", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "亞麻混紡襯衫", "url": "https://static.zara.net/assets/public/ee77/3142/66474a22afe3/eedbef858c32/04344502802-e1/04344502802-e1.jpg?ts=1774946000301&w=750",
-     "gender": "male", "style": "minimalist", "season": "all", "occasion": "all", "category": "tops"},
-    {"name": "亞麻混紡中長洋裝", "url": "https://static.zara.net/assets/public/98bb/0b0f/04fb4cf990bc/929e28113793/02103122104-e1/02103122104-e1.jpg?ts=1774347716612&w=750",
-     "gender": "female", "style": "minimalist", "season": "all", "occasion": "all", "category": "others"},
-    {"name": "亞麻混紡寬鬆襯衫", "url": "https://static.zara.net/assets/public/fa9e/1985/508e4ae9a96a/ca968a6a6bfa/08648023712-e1/08648023712-e1.jpg?ts=1770813038309&w=750",
-     "gender": "female", "style": "minimalist", "season": "all", "occasion": "all", "category": "tops"},
-]
-
-# ── 別名表：將 AI 可能輸出的字詞對應到 RAW_DATA 的 name ─────────────────────
-_NAME_ALIASES: dict[str, str] = {
-    # 男 tops
-    "linen oversize shirt": "linen blend oversize shirt",
-    "亞麻寬鬆襯衫": "linen blend oversize shirt",
-    "寬鬆亞麻襯衫": "linen blend oversize shirt",
-    "亞麻混紡寬版襯衫": "亞麻混紡寬版襯衫",
-    # 男 pants
-    "男牛仔褲": "man jeans",
-    "西裝長褲": "西裝長褲",
-    "寬鬆西裝": "wide leg trouser",
-    "oversized suit pant": "wide leg trouser",
-    # 男 tops (white T)
-    "white tee": "white t-shirt",
-    "白色t": "white t-shirt",
-    "白色t-shirt": "white t-shirt",
-    "白t": "white t-shirt",
-    # 男 shoes
-    "白色帆布鞋": "canvas sneaker",
-    "帆布鞋": "canvas sneaker",
-    "樂福鞋": "loafer",
-    "皮質樂福鞋": "loafer",
-    # 男 tops (polo)
-    "polo衫": "polo shirt",
-    "polo 衫": "polo shirt",
-    # 女 pants
-    "女寬鬆長褲": "wide leg pant",
-    "寬鬆長褲": "wide leg pant",
-    "亞麻長褲": "linen blend trouser",
-    "linen trouser": "linen blend trouser",
-    "linen blend trousers": "linen blend trouser",
-    "低腰牛仔褲": "woman jean",
-    "低腰寬版牛仔褲": "woman jean",
-    "wide leg jean": "woman jean",
-    "low rise jean": "woman jean",
-    "女牛仔褲": "woman jean",
-    "中長裙": "midi skirt",
-    "緞面裙": "midi skirt",
-    "迷你裙": "midi skirt",
-    "denim skirt": "midi skirt",
-    "mini skirt": "midi skirt",
-    "satin skirt": "midi skirt",
-    "短裙": "midi skirt",
-    "丹寧裙": "midi skirt",
-    # 女 tops
-    "無袖緞面上衣": "sleeveless satin blouse",
-    "緞面無袖": "sleeveless satin blouse",
-    "satin blouse": "sleeveless satin blouse",
-    "螺紋t": "ribbed t-shirt",
-    "螺紋上衣": "ribbed t-shirt",
-    "ribbed tee": "ribbed t-shirt",
-    "短版t": "crop t-shirt",
-    "短版上衣": "crop t-shirt",
-    "cropped tee": "crop t-shirt",
-    "y2k t": "crop t-shirt",
-    "女寬鬆襯衫": "cropped linen blend shirt",
-    "女亞麻襯衫": "cropped linen blend shirt",
-    "cropped linen shirt": "cropped linen blend shirt",
-    # 女 shoes
-    "平底鞋": "strappy heeled sandal",
-    "涼鞋": "strappy heeled sandal",
-    "strappy sandal": "strappy heeled sandal",
-    "strappy heeled sandals": "strappy heeled sandal",
-    # Korean style
-    "西裝外套": "西裝外套",
-    "大衣": "大衣",
-    "毛衣": "毛衣",
-    # Padres
-    "padres home jersey": "Padres Home Jersey",
-    "教士隊主場球衣": "Padres Home Jersey",
-    "padres city connect jersey": "Padres City Connect Jersey",
-    "教士隊城市限定球衣": "Padres City Connect Jersey",
-    # 新增競賽用單品別名對應
-    "紋理針織polo衫": "紋理針織POLO衫",
-    "textured knit polo shirt": "紋理針織POLO衫",
-    "亞麻混紡寬鬆短袖襯衫": "亞麻混紡寬鬆短袖襯衫",
-    "loose fit linen blend short sleeve shirt": "亞麻混紡寬鬆短袖襯衫",
-    "白色球鞋": "白色球鞋",
-    "white sneakers": "白色球鞋",
-    "印花短版上衣": "印花短版上衣",
-    "printed crop top": "印花短版上衣",
-    "府綢寬鬆襯衫": "府綢寬鬆襯衫",
-    "poplin oversize shirt": "府綢寬鬆襯衫",
-    "亞麻混紡開襟短袖襯衫": "亞麻混紡開襟短袖襯衫",
-    "linen blend open collar short sleeve shirt": "亞麻混紡開襟短袖襯衫",
-    "寬鬆版印花t shirt": "寬鬆版印花T shirt",
-    "loose fit printed t-shirt": "寬鬆版印花T shirt",
-    "針織polo衫": "針織POLO衫",
-    "knit polo shirt": "針織POLO衫",
-    "亞麻混紡休閒襯衫": "亞麻混紡休閒襯衫",
-    "linen blend casual shirt": "亞麻混紡休閒襯衫",
-    "合身基本款棉質t shirt": "合身基本款棉質T shirt",
-    "slim fit basic cotton t-shirt": "合身基本款棉質T shirt",
-    "亞麻混紡襯衫": "亞麻混紡襯衫",
-    "linen blend shirt": "亞麻混紡襯衫",
-    "亞麻混紡中長洋裝": "亞麻混紡中長洋裝",
-    "linen blend midi dress": "亞麻混紡中長洋裝",
-    "亞麻混紡寬鬆襯衫": "亞麻混紡寬鬆襯衫",
-    "linen blend loose fit shirt": "亞麻混紡寬鬆襯衫",
+# Padres pinned（真實商品，不生成）
+PINNED_IMAGES = {
+    "padres home jersey":         "https://i.postimg.cc/4xBkzZVC/home-jersey.avif",
+    "教士隊主場球衣":              "https://i.postimg.cc/4xBkzZVC/home-jersey.avif",
+    "padres city connect jersey": "https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
+    "教士隊城市限定球衣":          "https://i.postimg.cc/cLXyQZwy/city-connect.jpg",
 }
 
-# ── 以 name 為索引的快速查詢字典 ─────────────────────────────────────────────
-_NAME_TO_URL: dict[str, str] = {item["name"].lower(): item["url"] for item in RAW_DATA}
 
-# ── COMPOSITE_DICT：以 "gender_style_season_occasion_category" 為組合鍵 ──────
-def _build_composite_dict() -> dict[str, str]:
-    """將 RAW_DATA 預處理為組合鍵字典，O(n) 初始化，O(1) 查詢。"""
-    d: dict[str, str] = {}
-    for item in RAW_DATA:
-        g  = item["gender"].lower()
-        st = item["style"].lower()
-        se = item["season"].lower()
-        oc = item["occasion"].lower()
-        ca = item["category"].lower()
-        key = f"{g}_{st}_{se}_{oc}_{ca}"
-        d[key] = item["url"]
-    return d
+def _build_imagen_prompt(item_name: str, gender: str, style: str) -> str:
+    g = "men's" if gender not in ("Female", "女性") else "women's"
+    style_hint = f", {style} aesthetic" if style and style != "all" else ""
+    return (
+        f"Professional e-commerce product photography of a single {g} fashion item: "
+        f"{item_name}{style_hint}. The garment only, no model, no mannequin, "
+        f"laid flat or hanging, centered, soft studio lighting, "
+        f"clean light beige background, minimalist ZARA catalog style, photorealistic."
+    )
 
-COMPOSITE_DICT: dict[str, str] = _build_composite_dict()
 
-# ── 輔助：將 UI gender 對應到資料中的 gender 值 ──────────────────────────────
-def _normalize_gender(gender: str) -> str:
-    return "female" if gender in ("Female", "女性") else "male"
-
-def get_local_image_data_uri(filename: str) -> str:
-    import base64
-    filepath = os.path.join(os.path.dirname(__file__), filename)
-    if os.path.exists(filepath):
-        ext = filename.split('.')[-1].lower()
-        mime = f"image/{ext}" if ext in ("png", "jpg", "jpeg") else "image/jpeg"
-        if ext == "jpg":
-            mime = "image/jpeg"
+def _generate_item_image(item_name: str, gender: str, style: str = "all") -> str | None:
+    """同步生成一張商品圖 → Storage → cache 表。回傳 stored_url 或 None。"""
+    if not _IMAGEN_AVAILABLE or not (sb_url and sb_key) or not ALL_API_KEYS:
+        return None
+    key = item_name.lower().strip()
+    if key in _IMG_CACHE:               # double-check（並行時可能已被別的 thread 生成）
+        return _IMG_CACHE[key]
+    prompt = _build_imagen_prompt(item_name, gender, style)
+    for attempt in range(len(ALL_API_KEYS)):
+        key_idx, current_key = _pick_key_for_model(IMAGE_MODEL_NAME, IMAGE_RPD_SOFT_LIMIT)
+        if key_idx is None:
+            print("[Imagen] 所有 Key 今日圖片 RPD 已達軟限")
+            return None
         try:
-            with open(filepath, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode()
-                return f"data:{mime};base64,{b64}"
+            client = genai_new.Client(api_key=current_key)
+            resp = client.models.generate_images(
+                model=IMAGE_MODEL_NAME,
+                prompt=prompt,
+                config=genai_types.GenerateImagesConfig(
+                    number_of_images=1,
+                    aspect_ratio="3:4",
+                    output_mime_type="image/jpeg",
+                ),
+            )
+            if not resp.generated_images:
+                return None
+            img_bytes = resp.generated_images[0].image.image_bytes
+            with _key_lock:
+                _inc_daily_count(key_idx, IMAGE_MODEL_NAME)
+                count = _daily_count.get((key_idx, IMAGE_MODEL_NAME), 1)
+            _sb_quota_upsert(key_idx, IMAGE_MODEL_NAME, count)
+
+            # 上傳 Storage（沿用 Task 5 管線）
+            path = f"gen_{_hashlib.md5(key.encode()).hexdigest()}.jpg"
+            up = requests.post(
+                f"{sb_url}/storage/v1/object/{SB_IMAGE_BUCKET}/{path}",
+                headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}",
+                         "Content-Type": "image/jpeg", "x-upsert": "true"},
+                data=img_bytes, timeout=15)
+            if not up.ok:
+                print(f"[Imagen] Storage 上傳失敗 {up.status_code}: {up.text[:120]}")
+                return None
+            stored_url = f"{sb_url}/storage/v1/object/public/{SB_IMAGE_BUCKET}/{path}"
+            _sb_post("item_image_cache",
+                     {"item_name": item_name, "source_url": f"imagen:{IMAGE_MODEL_NAME}",
+                      "stored_url": stored_url})
+            _IMG_CACHE[key] = stored_url
+            print(f"[Imagen] generated: {item_name}")
+            return stored_url
         except Exception as e:
-            print(f"Error reading local image {filename}: {e}")
-    return ""
+            err = str(e)
+            if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                _mark_key_rpm_limited(key_idx, 65)
+                print(f"[Imagen] Key#{key_idx} 429, 換 Key")
+                continue
+            print(f"[Imagen] 生成失敗: {item_name} — {err[:200]}")
+            return None
+    return None
 
 
-def get_item_image(item_name: str, gender: str, category: str = "others",
-                   style: str = "all", season: str = "all", occasion: str = "all") -> str:
-    """名稱比對優先，組合鍵僅在有明確 style 時作 fallback。"""
-    n = item_name.lower().strip()
-
-    # 1. Padres 特例優先（不論 season / gender）
-    for padres_key in ("padres home jersey", "padres city connect jersey",
-                       "教士隊主場球衣", "教士隊城市限定球衣"):
-        if padres_key in n:
-            return _NAME_TO_URL.get(padres_key, "")
-
-    # 2. 名稱直接命中 _NAME_TO_URL
-    direct = _NAME_TO_URL.get(n)
-    if direct:
-        return direct
-
-    # 3. 別名表 → _NAME_TO_URL
-    canonical = _NAME_ALIASES.get(n)
-    if canonical:
-        url = _NAME_TO_URL.get(canonical.lower(), "")
-        if url:
-            return url
-
-    # 4. 子字串模糊比對（AI 輸出常帶品牌前綴，如 "ZARA 亞麻混紡寬版襯衫"）
-    for key, url in _NAME_TO_URL.items():
-        if key in n or n in key:
-            return url
-
-    # 5. 組合鍵（Composite Key）兜底比對
-    g  = _normalize_gender(gender)
-    st = style.lower()
-    se = season.lower()
-    oc = occasion.lower()
-    ca = category.lower()
-
-    # 優先順序：指定風格 -> all 風格
-    st_opts = [st]
-    if st != "all":
-        st_opts.append("all")
-
-    # 對於 gender, season, occasion，優先配對具體值，再配對 "all"
-    g_opts = [g, "all"]
-    se_opts = [se, "all"]
-    oc_opts = [oc, "all"]
-
-    for st_val in st_opts:
-        for g_val in g_opts:
-            for se_val in se_opts:
-                for oc_val in oc_opts:
-                    composite_key = f"{g_val}_{st_val}_{se_val}_{oc_val}_{ca}"
-                    if composite_key in COMPOSITE_DICT:
-                        return COMPOSITE_DICT[composite_key]
-
-    # 6. 如果以上都失敗，使用本機預設圖檔 (base64 格式) 避免破圖
-    fallback_filename = f"{ca}.jpg"
-    if ca == "tops":
-        fallback_filename = "tops.jpg"
-    elif ca == "pants":
-        fallback_filename = "pants.jpg"
-    else:
-        fallback_filename = "others.jpg"
-    
-    local_b64 = get_local_image_data_uri(fallback_filename)
-    if local_b64:
-        return local_b64
-
-    return ""
-
+def ensure_item_images(item_names: list[str], gender: str, style: str = "all"):
+    """Generate 後同步補齊主要單品圖（並行，最多 3 張，每張各自挑 Key）。"""
+    _load_image_cache_once()
+    todo = [n for n in item_names
+            if n and n.lower().strip() not in _IMG_CACHE
+            and n.lower().strip() not in PINNED_IMAGES]
+    if not todo:
+        return
+    import concurrent.futures as _cf
+    with _cf.ThreadPoolExecutor(max_workers=3) as ex:
+        futures = [ex.submit(_generate_item_image, n, gender, style) for n in todo[:3]]
+        for f in futures:
+            try:
+                f.result(timeout=30)
+            except Exception as e:
+                print(f"[Imagen] ensure exception: {e}")
 
 # ─── Task 5：圖片穩定性層（Supabase Storage 暖存 + onerror fallback）─────────
 # 問題：postimg / zara.net 外鏈常失效或被防盜鏈擋 → 破圖。
@@ -1683,23 +1500,43 @@ def _warm_image_to_storage(item_name: str, source_url: str):
 
 
 def resolve_item_image(item_name: str, gender: str, category: str = "others",
-                       style: str = "all", season: str = "all", occasion: str = "all") -> str:
+                       style: str = "all", season: str = "all", occasion: str = "all",
+                       generate: bool = False) -> str:
     """
-    取代 get_item_image 作為 UI 唯一入口：
-    1. item_image_cache 命中 → 直接回自家 Storage URL（最穩）
-    2. 否則走原三層比對拿外鏈 URL，並丟背景執行緒暖存
-    3. 全部失敗 → SVG placeholder
+    UI 唯一圖片入口（v3）：
+    1. Padres pinned（真實商品）→ 直接回，並背景暖存進自家 Storage
+    2. item_image_cache 命中 → 自家 Storage URL（最穩、零延遲）
+    3. generate=True → 同步呼叫 Imagen 生成（5-10 秒，僅在 Generate 流程/Swap 時用）
+    4. 都沒有 → SVG placeholder（generate=False 的 lazy 場景）
     """
     _load_image_cache_once()
     key = item_name.lower().strip()
+
+    # 1. Pinned（含子字串比對：AI 輸出常帶前綴）
+    for pk, purl in PINNED_IMAGES.items():
+        if pk in key:
+            cached = _IMG_CACHE.get(pk)
+            if cached:
+                return cached
+            if sb_url and sb_key and pk not in _IMG_WARMING:
+                _IMG_WARMING.add(pk)
+                _threading.Thread(target=_warm_image_to_storage,
+                                  args=(pk, purl), daemon=True).start()
+            return purl
+
+    # 2. Cache
     cached = _IMG_CACHE.get(key)
     if cached:
         return cached
-    url = get_item_image(item_name, gender, category, style=style, season=season, occasion=occasion)
-    if url.startswith("http") and sb_url and sb_key and key not in _IMG_WARMING:
-        _IMG_WARMING.add(key)
-        _threading.Thread(target=_warm_image_to_storage, args=(item_name, url), daemon=True).start()
-    return url or _FALLBACK_SVG_URI
+
+    # 3. 同步生成
+    if generate:
+        url = _generate_item_image(item_name, gender, style)
+        if url:
+            return url
+
+    # 4. Placeholder
+    return _FALLBACK_SVG_URI
 
 
 # ─── Results Display ──────────────────────────────────────────────────────────
@@ -1721,7 +1558,8 @@ if st.session_state.get("builder_pool"):
                 else:
                     st.session_state[_img_key] = resolve_item_image(
                         _item.get("name",""), user_gender, _slot,
-                        style=_primary_style, season=user_season, occasion=user_occ
+                        style=_primary_style, season=user_season, occasion=user_occ,
+                        generate=(_i == 0)   # 第一件=主圖（已生成）；候補 lazy，swap 時才生成
                     )
 
 if st.session_state.last_result:
@@ -1795,7 +1633,8 @@ if st.session_state.last_result:
                 primary_style = user_sty[0] if user_sty else "all"
                 st.session_state[img_cache_key] = resolve_item_image(
                     raw_name, user_gender, category,
-                    style=primary_style, season=user_season, occasion=user_occ
+                    style=primary_style, season=user_season, occasion=user_occ,
+                    generate=True   # 正常情況 ensure 已生成 → cache hit；此為保險網
                 )
         img_url = st.session_state[img_cache_key]
 
@@ -2000,6 +1839,19 @@ if st.session_state.last_result:
                         new_idx = (idx + 1) % total
                         st.session_state["builder_idx"][slot] = new_idx
                         log_event("builder_swap", item_name=opts[new_idx].get("name", ""))
+
+                        # ── Image Engine v3：候補單品圖 lazy 生成（首次 swap 到才花 quota）──
+                        _bimg_key = f"bimg_{slot}_{new_idx}"
+                        _cur_img = st.session_state.get(_bimg_key, "")
+                        if (not _cur_img) or _cur_img.startswith("data:image/svg"):
+                            with st.spinner("正在生成商品圖..." if lang_select == "繁體中文"
+                                            else "Generating product visual..."):
+                                _gen_url = resolve_item_image(
+                                    opts[new_idx].get("name", ""), user_gender, slot,
+                                    style=(user_sty[0] if user_sty else "all"),
+                                    generate=True
+                                )
+                            st.session_state[_bimg_key] = _gen_url
 
                         # ── Task 2：為換上的單品生成一句 AI 解釋（有 cache 就跳過）──
                         _reason_key = f"{slot}_{new_idx}"
