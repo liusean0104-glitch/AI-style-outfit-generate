@@ -1460,9 +1460,10 @@ def _generate_item_image(item_name: str, gender: str, style: str = "all") -> str
                 low = err.lower()
                 if "429" in err or "resource_exhausted" in low:
                     _mark_key_rpm_limited(key_idx, 65)
-                    print(f"[ImageGen] Key#{key_idx} {model_name} 429, 換 Key")
+                    _record_image_error(model_name, f"Key#{key_idx} quota/429: {err[:150]}")
                     continue  # 同模型換 Key
-                if ("billed" in low or "billing" in low or "permission" in low
+                if ("billed" in low or "billing" in low or "paid plan" in low
+                        or "permission" in low or "upgrade your account" in low
                         or "403" in err or "not found" in low or "404" in err
                         or "only accessible" in low):
                     # 這個模型在此帳號等級不可用 → 整個 session 跳過，直接 fallback
@@ -1609,9 +1610,9 @@ if _pending:
                 if n and n.lower().strip() not in _IMG_CACHE
                 and not any(pk in n.lower() for pk in PINNED_IMAGES)]
     if _missing and _IMAGE_LAST_ERRORS:
+        _err_lines = "\n\n".join(f"`{e}`" for e in _IMAGE_LAST_ERRORS[-3:])
         st.warning(
-            f"⚠️ 商品圖生成失敗（{len(_missing)} 件）。最近錯誤：\n\n"
-            f"`{_IMAGE_LAST_ERRORS[-1]}`"
+            f"⚠️ 商品圖生成失敗（{len(_missing)} 件）。最近錯誤：\n\n{_err_lines}"
         )
 
 # 圖片預載：在 get_item_image 定義後執行，Builder 換件時 instant 切換
