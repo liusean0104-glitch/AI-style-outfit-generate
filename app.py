@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -158,6 +159,14 @@ def _cache_set(key: str, value: dict):
     _REC_CACHE[key] = value
 sb_url = get_secret("SUPABASE_URL")
 sb_key = get_secret("SUPABASE_KEY")
+# ⚠️ 前端點擊追蹤會把這把 key 嵌進瀏覽器 HTML。
+#    務必設定為 anon key（搭配 events 表 INSERT-only RLS policy），
+#    絕對不要把 service_role key 放進 SUPABASE_ANON_KEY。
+sb_anon_key = get_secret("SUPABASE_ANON_KEY", sb_key)
+# 圖片穩定性：Supabase Storage public bucket 名稱
+SB_IMAGE_BUCKET = get_secret("SB_IMAGE_BUCKET", "item-images")
+# Pro 金流：Stripe Payment Link（在 Stripe Dashboard 建立，無需後端）
+STRIPE_PAYMENT_LINK = get_secret("STRIPE_PAYMENT_LINK", "")
 _sb_quota_restore()  # 啟動時從 Supabase 還原今日 Key×Model 計數
 
 st.set_page_config(page_title="AI Stylist", page_icon="👗", layout="centered")
@@ -183,6 +192,24 @@ if "builder_idx" not in st.session_state:
     st.session_state["builder_idx"] = {"top":0,"pants":0,"shoes":0}
 if "pro_intent_clicked" not in st.session_state:
     st.session_state["pro_intent_clicked"] = False
+# ── Task 1：Conversational Memory ──
+if "user_id" not in st.session_state:
+    st.session_state["user_id"] = None      # 登入後 = md5(email)，未登入 = None
+if "user_email" not in st.session_state:
+    st.session_state["user_email"] = None
+if "user_profile" not in st.session_state:
+    st.session_state["user_profile"] = None  # 從 user_profiles 表載入的偏好摘要
+# ── Task 3：session 內互動訊號（未登入也有 single-session memory）──
+if "clicked_items" not in st.session_state:
+    st.session_state["clicked_items"] = []   # 本 session 點過 Discover 的單品名稱
+if "liked_signal" not in st.session_state:
+    st.session_state["liked_signal"] = []    # [("like"/"dislike", combo_names)]
+# ── Task 2：swap AI reasoning cache ──
+if "swap_reasons" not in st.session_state:
+    st.session_state["swap_reasons"] = {}    # {f"{slot}_{idx}": "一句話解釋"}
+# ── Task 4：Pro funnel 狀態 ──
+if "pro_paywall_viewed" not in st.session_state:
+    st.session_state["pro_paywall_viewed"] = False
 
 # 2. 注入自定義 CSS (Minimalist Luxury / ZARA Aesthetic)
 st.markdown("""
@@ -431,6 +458,7 @@ def log_session(gender, height, weight, season, occasion, weather, styles, langu
     }
     payload = {
         "id": st.session_state.session_id,
+        "user_id": st.session_state.get("user_id"),  # Task 1：登入用戶跨 session 關聯鍵
         "gender": gender,
         "height_cm": int(height),
         "weight_kg": int(weight),
@@ -472,19 +500,220 @@ def log_event(event_type: str, item_name: str = None):
     _sb_post("events", payload)
 
 
+def _current_combo_names() -> str:
+    pool = st.session_state.get("builder_pool", {}) or {}
+    bidx = st.session_state.get("builder_idx", {}) or {}
+    parts = []
+    for s in ("top", "pants", "shoes"):
+        opts = pool.get(s, [])
+        i = bidx.get(s, 0)
+        if opts and i < len(opts):
+            parts.append(opts[i].get("name", ""))
+    return " + ".join(p for p in parts if p)
+
+
 def track_like():
     log_event("like")
+    combo = _current_combo_names()
+    if combo:
+        st.session_state["liked_signal"].append(("like", combo))  # Task 3：回饋進下次 prompt
     st.toast("Thank you! / 感謝您的回饋！")
 
 
 def track_dislike():
     log_event("dislike")
+    combo = _current_combo_names()
+    if combo:
+        st.session_state["liked_signal"].append(("dislike", combo))
     st.toast("We'll do better next time! / 我們會繼續改進！")
+
+
+# ─── Task 1 + 3：Memory & Feedback Loop helpers ─────────────────────────────
+
+def _sb_get(table: str, params: dict) -> list:
+    """共用查詢（PostgREST GET），失敗回空 list。"""
+    if not sb_url or not sb_key:
+        return []
+    url = f"{sb_url}/rest/v1/{table}"
+    headers = {"apikey": sb_key, "Authorization": f"Bearer {sb_key}"}
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=3)
+        if r.ok:
+            return r.json()
+        print(f"[Supabase] GET {table} error: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"[Supabase] GET {table} exception: {e}")
+    return []
+
+
+def load_user_profile(user_id: str) -> dict | None:
+    """登入時載入跨 session 偏好。"""
+    rows = _sb_get("user_profiles", {"id": f"eq.{user_id}", "select": "*", "limit": 1})
+    return rows[0] if rows else None
+
+
+def upsert_user_profile(user_id: str, email: str, prefs: dict):
+    """寫回偏好快照（merge-duplicates upsert）。"""
+    if not sb_url or not sb_key:
+        return
+    url = f"{sb_url}/rest/v1/user_profiles"
+    headers = {
+        "apikey": sb_key,
+        "Authorization": f"Bearer {sb_key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+    payload = {"id": user_id, "email": email, "prefs": prefs,
+               "updated_at": _datetime.datetime.utcnow().isoformat()}
+    try:
+        requests.post(url, headers=headers, json=payload, timeout=3)
+    except Exception as e:
+        print(f"[Supabase] user_profiles upsert exception: {e}")
+
+
+def fetch_recent_clicks(session_id: str, user_id: str | None) -> list[str]:
+    """
+    Task 3 關鍵：Discover 點擊由前端 JS fetch 直寫 Supabase（見 Discover 按鈕），
+    Python 端在下一次 Generate 前把它讀回來，餵進 prompt。
+    登入用戶額外撈跨 session 的歷史點擊（靠 sessions.user_id 關聯）。
+    """
+    names: list[str] = list(st.session_state.get("clicked_items", []))
+    # 本 session 的前端點擊
+    rows = _sb_get("events", {
+        "session_id": f"eq.{session_id}",
+        "event_type": "eq.discover_click",
+        "select": "item_name",
+        "order": "created_at.desc",
+        "limit": 20,
+    })
+    names += [r["item_name"] for r in rows if r.get("item_name")]
+    # 登入用戶：跨 session 歷史（先查該 user 的 sessions，再查 events）
+    if user_id:
+        srows = _sb_get("sessions", {"user_id": f"eq.{user_id}", "select": "id",
+                                     "order": "created_at.desc", "limit": 10})
+        sids = [s["id"] for s in srows if s.get("id") and s["id"] != session_id]
+        if sids:
+            in_list = ",".join(f'"{s}"' for s in sids)
+            erows = _sb_get("events", {
+                "session_id": f"in.({in_list})",
+                "event_type": "eq.discover_click",
+                "select": "item_name",
+                "order": "created_at.desc",
+                "limit": 30,
+            })
+            names += [r["item_name"] for r in erows if r.get("item_name")]
+    # 去重保序
+    seen, out = set(), []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out[:10]
+
+
+def build_personal_context() -> str:
+    """
+    組合個人化 context 注入 prompt：
+    1. 登入用戶的跨 session 偏好快照（user_profiles.prefs）
+    2. 本 session（+ 歷史）的 Discover 點擊 → 興趣訊號
+    3. 本 session 的 like / dislike
+    """
+    parts = []
+    profile = st.session_state.get("user_profile")
+    if profile and profile.get("prefs"):
+        p = profile["prefs"]
+        fav_styles = p.get("fav_styles", [])
+        if fav_styles:
+            parts.append(f"Returning user. Historically preferred styles: {', '.join(fav_styles[:5])}.")
+        past_clicks = p.get("clicked_items", [])
+        if past_clicks:
+            parts.append(f"Items they clicked to shop in past visits: {', '.join(past_clicks[:6])}.")
+    clicks = fetch_recent_clicks(st.session_state.session_id,
+                                 st.session_state.get("user_id"))
+    if clicks:
+        parts.append(
+            f"THIS-SESSION SHOPPING SIGNAL (strongest signal — they clicked through to buy these): "
+            f"{', '.join(clicks)}. Recommend items with similar cut/color/vibe, but NOT identical duplicates."
+        )
+    for verdict, combo in st.session_state.get("liked_signal", [])[-3:]:
+        if verdict == "like":
+            parts.append(f"They LIKED this combo: {combo}. Lean into this direction.")
+        else:
+            parts.append(f"They DISLIKED this combo: {combo}. Avoid this direction.")
+    if not parts:
+        return ""
+    return "PERSONALIZATION CONTEXT (use to tailor, never mention explicitly):\n- " + "\n- ".join(parts)
+
+
+# ─── Task 3：可追蹤的 Discover 按鈕 ─────────────────────────────────────────
+def render_discover_button(label: str, zara_url: str, item_name: str):
+    """
+    取代 st.link_button：
+    - <a target="_blank"> 由使用者手勢直接開 ZARA（不會被 popup blocker 擋）
+    - onclick 同時用 fetch 將 discover_click 直寫 Supabase events 表
+    ⚠️ 這段 HTML 會帶 sb_anon_key 到瀏覽器 → 必須是 anon key，
+       且 events 表要設 INSERT-only RLS policy（見 schema_v2.sql）。
+    """
+    if not (sb_url and sb_anon_key):
+        st.link_button(label, zara_url)  # 無 Supabase 時退回原行為
+        return
+    payload = json.dumps({
+        "session_id": st.session_state.session_id,
+        "rec_id": st.session_state.get("rec_id"),
+        "event_type": "discover_click",
+        "item_name": item_name,
+    })
+    html = f"""
+    <a href="{zara_url}" target="_blank" rel="noopener"
+       onclick='fetch("{sb_url}/rest/v1/events", {{
+            method: "POST",
+            headers: {{
+                "apikey": "{sb_anon_key}",
+                "Authorization": "Bearer {sb_anon_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal"
+            }},
+            body: JSON.stringify({payload}),
+            keepalive: true
+       }}).catch(function(e){{}});'
+       style="display:inline-block; font-family:Inter,Helvetica,sans-serif; font-size:0.8rem;
+              letter-spacing:2px; text-transform:uppercase; color:#fff; background:#111;
+              padding:0.55rem 1.6rem; text-decoration:none; border:1px solid #111;">
+        {label}
+    </a>
+    <style>a:hover {{ background:#fff !important; color:#111 !important; }}</style>
+    """
+    components.html(html, height=52)
+
+
+# ─── Task 2 helper：輕量單句生成（只用 flash-lite，保護主力 quota）──────────
+def get_light_completion(prompt: str) -> str | None:
+    """Swap reasoning 等微任務專用：固定走最便宜 tier，失敗就放棄不重試太久。"""
+    lite_tier = MODEL_TIERS[-1]  # gemini-3.1-flash-lite, RPD 充裕
+    for attempt in range(min(len(ALL_API_KEYS), 2)):
+        key_idx, current_key = _pick_key_for_model(lite_tier["name"], lite_tier["rpd_soft_limit"])
+        if key_idx is None:
+            return None
+        try:
+            genai.configure(api_key=current_key)
+            model = genai.GenerativeModel(lite_tier["name"])
+            resp = model.generate_content([prompt])
+            with _key_lock:
+                _inc_daily_count(key_idx, lite_tier["name"])
+                count = _daily_count.get((key_idx, lite_tier["name"]), 1)
+            _sb_quota_upsert(key_idx, lite_tier["name"], count)
+            return resp.text.strip()
+        except Exception as e:
+            if "429" in str(e):
+                _mark_key_rpm_limited(key_idx, 65)
+                continue
+            return None
+    return None
 
 # 2. 核心 AI 函數
 # MODEL_TIERS 已定義於頂部 key rotation 區段
 
-def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, uploaded_image=None, custom_prompt=None):
+def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, uploaded_image=None, custom_prompt=None, personal_context=""):
     if not ALL_API_KEYS:
         return None, "Error: API Key missing"
     
@@ -524,16 +753,18 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
     if "Padres City Connect Jersey" in sty:
         specific_style_rule = (
             f"SPECIAL STYLE RULE: The user IS wearing a '{p_cc_name}' as the main top. "
-            f"In your JSON response, the first item in 'zara_items' MUST be exactly: "
-            f"{{\"name\": \"{p_cc_name}\", \"reason\": \"{p_cc_reason}\", \"category\": \"top\", \"price_range\": \"{p_price}\", \"recommended_size\": \"L\"}}. "
-            f"Do NOT suggest any other main tops. Focus entirely on matching pants, shoes, and inner layers."
+            f"In your JSON response, the FIRST item in 'top_options' MUST be exactly: "
+            f"{{\"name\": \"{p_cc_name}\", \"reason\": \"{p_cc_reason}\", \"price_range\": \"{p_price}\", \"recommended_size\": \"L\"}}. "
+            f"The other two top_options should be layering pieces that go OVER or UNDER the jersey. "
+            f"Focus on matching pants, shoes, and inner layers."
         )
     elif "Padres Home Jersey" in sty:
         specific_style_rule = (
             f"SPECIAL STYLE RULE: The user IS wearing a '{p_home_name}' as the main top. "
-            f"In your JSON response, the first item in 'zara_items' MUST be exactly: "
-            f"{{\"name\": \"{p_home_name}\", \"reason\": \"{p_home_reason}\", \"category\": \"top\", \"price_range\": \"{p_price}\", \"recommended_size\": \"L\"}}. "
-            f"Do NOT suggest any other main tops. Focus entirely on matching pants, shoes, and inner layers."
+            f"In your JSON response, the FIRST item in 'top_options' MUST be exactly: "
+            f"{{\"name\": \"{p_home_name}\", \"reason\": \"{p_home_reason}\", \"price_range\": \"{p_price}\", \"recommended_size\": \"L\"}}. "
+            f"The other two top_options should be layering pieces that go OVER or UNDER the jersey. "
+            f"Focus on matching pants, shoes, and inner layers."
         )
 
     custom_prompt_rule = ""
@@ -548,6 +779,7 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
         f"{system_persona}\n"
         f"User Profile: Gender: {gender}, Height: {height}cm, Weight: {weight}kg.\n"
         f"Context: Season: {season}, Occasion: {occ}, Weather: {wea}, Style: {sty_str}.\n"
+        f"{personal_context}\n"
         f"{specific_style_rule}\n"
         f"{custom_prompt_rule}\n"
         f"LANGUAGE RULE: Respond in {lang}. Use Traditional Chinese if '繁體中文'.\n"
@@ -555,15 +787,9 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
         f"Provide response in valid JSON format ONLY:\n"
         f"{{\n"
         f"  \"critique\": \"(Optional) Analysis of uploaded outfit if provided, otherwise empty.\",\n"
-        f"  \"zara_items\": [\n"
-        f"    {{\n"
-        f"      \"name\": \"ZARA [Item Name]\",\n"
-        f"      \"reason\": \"Reason why this fits their physique.\",\n"
-        f"      \"category\": \"top/pants/shoes\",\n"
-        f"      \"price_range\": \"Estimated price range\",\n"
-        f"      \"recommended_size\": \"Calculated size (e.g. S, M, L, XL, EU 42) based on user's height/weight\"\n"
-        f"    }}\n"
-        f"  ],\n"
+        f"  \"top_options\": [ {{...}}, {{...}}, {{...}} ],\n"
+        f"  \"pants_options\": [ {{...}}, {{...}}, {{...}} ],\n"
+        f"  \"shoes_options\": [ {{...}}, {{...}}, {{...}} ],\n"
         f"  \"other_brands\": [\n"
         f"    {{\n"
         f"      \"name\": \"[Brand Name] [Item Name]\",\n"
@@ -578,7 +804,16 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
         f"  ],\n"
         f"  \"description\": \"A paragraph on the overall look.\"\n"
         f"}}\n"
-        f"CRITICAL: 3 'zara_items', 4-5 'other_brands', 2 'accessories'.\n"
+        f"Each option object in top_options / pants_options / shoes_options MUST be:\n"
+        f"{{\n"
+        f"  \"name\": \"ZARA [Item Name]\",\n"
+        f"  \"reason\": \"Reason why this fits their physique.\",\n"
+        f"  \"price_range\": \"Estimated price range\",\n"
+        f"  \"recommended_size\": \"Calculated size (e.g. S, M, L, XL, EU 42) based on user's height/weight\"\n"
+        f"}}\n"
+        f"CRITICAL: EXACTLY 3 options per category, ordered best-first. The three options within a "
+        f"category must be meaningfully different (cut / color / fabric), yet EACH must coordinate "
+        f"with the first option of the other two categories. Also 4-5 'other_brands', 2 'accessories'.\n"
     )
     
     last_error = None
@@ -835,6 +1070,46 @@ if floral_b64:
         <img src="data:image/png;base64,{floral_b64}" class="floral-decoration floral-br">
     """, unsafe_allow_html=True)
 
+# ─── Task 1：Optional Login（跨 session 記憶）─────────────────────────────
+_login_title = ("👤 會員登入（選填）— 記住你的風格" if lang_select == "繁體中文"
+                else "👤 Sign in (optional) — we'll remember your style")
+with st.expander(_login_title, expanded=False):
+    if st.session_state.get("user_id"):
+        _msg = (f"已登入：{st.session_state['user_email']}　我們會記住你的風格偏好與選擇。"
+                if lang_select == "繁體中文"
+                else f"Signed in as {st.session_state['user_email']}. Your style memory is active.")
+        st.markdown(f'<div style="font-family:Inter,sans-serif;font-size:0.8rem;color:#555;">✓ {_msg}</div>',
+                    unsafe_allow_html=True)
+        if st.button("登出 / Sign out", key="logout_btn"):
+            st.session_state["user_id"] = None
+            st.session_state["user_email"] = None
+            st.session_state["user_profile"] = None
+            st.rerun()
+    else:
+        _email = st.text_input(
+            "Email",
+            placeholder="your@email.com",
+            key="login_email_input",
+            label_visibility="collapsed",
+        )
+        _hint = ("不需密碼。輸入 Email 即可在下次回訪時沿用你的風格記憶。"
+                 if lang_select == "繁體中文"
+                 else "No password needed — your email is just a key to your style memory.")
+        st.caption(_hint)
+        if _email and st.button("登入 / Sign in", key="login_btn"):
+            _email_clean = _email.strip().lower()
+            if "@" in _email_clean and "." in _email_clean:
+                _uid = _hashlib.md5(_email_clean.encode()).hexdigest()
+                st.session_state["user_id"] = _uid
+                st.session_state["user_email"] = _email_clean
+                st.session_state["user_profile"] = load_user_profile(_uid)
+                if not st.session_state["user_profile"]:
+                    upsert_user_profile(_uid, _email_clean, {})
+                log_event("login")
+                st.rerun()
+            else:
+                st.warning("請輸入有效的 Email / Please enter a valid email")
+
 # ─── Height & Weight Row ───
 col_h, col_w = st.columns(2)
 with col_h:
@@ -892,16 +1167,23 @@ elif st.button(t["btn"]):
     # 清除 Builder 舊狀態，避免換風格後殘留舊 pool
     st.session_state["builder_pool"] = {}
     st.session_state["builder_idx"]  = {"top":0,"pants":0,"shoes":0}
+    st.session_state["swap_reasons"] = {}   # Task 2：清除舊的 swap 解釋
+
+    # ── Task 1+3：組合個人化 context（登入記憶 + Discover 點擊回饋）──
+    _personal_ctx = build_personal_context()
 
     # ── 方案三：Cache 命中檢查（僅限無圖、無 custom prompt）──
+    # 個人化 context 的 hash 一併納入 cache key：
+    # 同樣條件但點擊訊號不同 → 視為不同請求，推薦才會「越用越準」
     _cache_key = None
     _cached_result = None
     _is_cacheable = not uploaded_file and not user_custom_prompt.strip()
     if _is_cacheable:
+        _ctx_hash = _hashlib.md5(_personal_ctx.encode()).hexdigest()[:8] if _personal_ctx else "none"
         _cache_key = _make_cache_key(
             user_gender, user_height, user_weight,
             user_season, user_occ, user_wea, user_sty, lang_select
-        )
+        ) + f"_{_ctx_hash}"
         _cached_result = _cache_get(_cache_key)
 
     if _cached_result:
@@ -938,7 +1220,7 @@ elif st.button(t["btn"]):
                 get_ai_recommendation,
                 user_gender, user_height, user_weight, user_season,
                 user_occ, user_wea, user_sty, lang_select, uploaded_file,
-                user_custom_prompt
+                user_custom_prompt, _personal_ctx
             )
             tip_idx = 0
             start_time = time.time()
@@ -1008,6 +1290,24 @@ elif st.button(t["btn"]):
             rec_id = log_recommendation(result)
             st.session_state.rec_id = rec_id
             log_event("generate")
+
+            # ── Task 1：登入用戶 → 更新跨 session 偏好快照 ──
+            if st.session_state.get("user_id"):
+                _old_prefs = (st.session_state.get("user_profile") or {}).get("prefs", {}) or {}
+                _fav = list(dict.fromkeys((user_sty or []) + _old_prefs.get("fav_styles", [])))[:8]
+                _clk = fetch_recent_clicks(st.session_state.session_id, st.session_state["user_id"])[:8]
+                _new_prefs = {
+                    "fav_styles": _fav,
+                    "clicked_items": _clk,
+                    "gender": user_gender,
+                    "height": int(user_height),
+                    "weight": int(user_weight),
+                }
+                upsert_user_profile(st.session_state["user_id"],
+                                    st.session_state["user_email"], _new_prefs)
+                st.session_state["user_profile"] = {"id": st.session_state["user_id"],
+                                                    "email": st.session_state["user_email"],
+                                                    "prefs": _new_prefs}
 
 # ─── Image Engine ──────────────────────────────────────────────────────────
 
@@ -1316,6 +1616,92 @@ def get_item_image(item_name: str, gender: str, category: str = "others",
     return ""
 
 
+# ─── Task 5：圖片穩定性層（Supabase Storage 暖存 + onerror fallback）─────────
+# 問題：postimg / zara.net 外鏈常失效或被防盜鏈擋 → 破圖。
+# 策略：第一次用到某張圖時，背景執行緒把它抓下來上傳到自家 Supabase Storage，
+#       並寫入 item_image_cache 表；之後一律走自家 CDN URL。
+#       前端 <img> 再加 onerror 換 SVG placeholder 作最後保險。
+
+_FALLBACK_SVG_URI = "data:image/svg+xml;utf8," + urllib.parse.quote(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="500">'
+    '<rect width="100%" height="100%" fill="#f4f1ee"/>'
+    '<text x="50%" y="46%" font-family="Helvetica" font-size="44" '
+    'text-anchor="middle" fill="#c9bfb6">VOGUE</text>'
+    '<text x="50%" y="56%" font-family="Helvetica" font-size="13" letter-spacing="4" '
+    'text-anchor="middle" fill="#c9bfb6">IMAGE UNAVAILABLE</text></svg>'
+)
+
+_IMG_CACHE: dict[str, str] = {}        # {item_name_lower: storage_url}（模組層，跨 rerun 存活）
+_IMG_CACHE_LOADED = False
+_IMG_WARMING: set = set()              # 防止同名重複暖存
+
+
+def _load_image_cache_once():
+    """啟動後第一次需要圖片時，把 item_image_cache 表整批載入記憶體。"""
+    global _IMG_CACHE_LOADED
+    if _IMG_CACHE_LOADED or not (sb_url and sb_key):
+        _IMG_CACHE_LOADED = True
+        return
+    rows = _sb_get("item_image_cache", {"select": "item_name,stored_url", "limit": "2000"})
+    for r in rows:
+        if r.get("item_name") and r.get("stored_url"):
+            _IMG_CACHE[r["item_name"].lower()] = r["stored_url"]
+    _IMG_CACHE_LOADED = True
+    print(f"[ImageCache] loaded {len(_IMG_CACHE)} cached images")
+
+
+def _warm_image_to_storage(item_name: str, source_url: str):
+    """背景執行：抓圖 → 上傳 Storage（x-upsert）→ 寫 cache 表 → 更新記憶體 dict。"""
+    key = item_name.lower()
+    try:
+        resp = requests.get(source_url, timeout=8, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/537.36",
+            "Referer": "https://www.zara.com/",
+        })
+        if not resp.ok or len(resp.content) < 1000:
+            return
+        content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0]
+        ext = {"image/png": "png", "image/webp": "webp", "image/avif": "avif"}.get(content_type, "jpg")
+        path = f"{_hashlib.md5(key.encode()).hexdigest()}.{ext}"
+        up = requests.post(
+            f"{sb_url}/storage/v1/object/{SB_IMAGE_BUCKET}/{path}",
+            headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}",
+                     "Content-Type": content_type, "x-upsert": "true"},
+            data=resp.content, timeout=10)
+        if not up.ok:
+            print(f"[ImageCache] upload failed {up.status_code}: {up.text[:120]}")
+            return
+        stored_url = f"{sb_url}/storage/v1/object/public/{SB_IMAGE_BUCKET}/{path}"
+        _sb_post("item_image_cache",
+                 {"item_name": item_name, "source_url": source_url, "stored_url": stored_url})
+        _IMG_CACHE[key] = stored_url
+        print(f"[ImageCache] warmed: {item_name}")
+    except Exception as e:
+        print(f"[ImageCache] warm exception for {item_name}: {e}")
+    finally:
+        _IMG_WARMING.discard(key)
+
+
+def resolve_item_image(item_name: str, gender: str, category: str = "others",
+                       style: str = "all", season: str = "all", occasion: str = "all") -> str:
+    """
+    取代 get_item_image 作為 UI 唯一入口：
+    1. item_image_cache 命中 → 直接回自家 Storage URL（最穩）
+    2. 否則走原三層比對拿外鏈 URL，並丟背景執行緒暖存
+    3. 全部失敗 → SVG placeholder
+    """
+    _load_image_cache_once()
+    key = item_name.lower().strip()
+    cached = _IMG_CACHE.get(key)
+    if cached:
+        return cached
+    url = get_item_image(item_name, gender, category, style=style, season=season, occasion=occasion)
+    if url.startswith("http") and sb_url and sb_key and key not in _IMG_WARMING:
+        _IMG_WARMING.add(key)
+        _threading.Thread(target=_warm_image_to_storage, args=(item_name, url), daemon=True).start()
+    return url or _FALLBACK_SVG_URI
+
+
 # ─── Results Display ──────────────────────────────────────────────────────────
 # 圖片預載：在 get_item_image 定義後執行，Builder 換件時 instant 切換
 if st.session_state.get("builder_pool"):
@@ -1333,7 +1719,7 @@ if st.session_state.get("builder_pool"):
                     else:
                         st.session_state[_img_key] = "https://i.postimg.cc/4xBkzZVC/home-jersey.avif"
                 else:
-                    st.session_state[_img_key] = get_item_image(
+                    st.session_state[_img_key] = resolve_item_image(
                         _item.get("name",""), user_gender, _slot,
                         style=_primary_style, season=user_season, occasion=user_occ
                     )
@@ -1407,7 +1793,7 @@ if st.session_state.last_result:
                     st.session_state[img_cache_key] = "https://i.postimg.cc/4xBkzZVC/home-jersey.avif"
             else:
                 primary_style = user_sty[0] if user_sty else "all"
-                st.session_state[img_cache_key] = get_item_image(
+                st.session_state[img_cache_key] = resolve_item_image(
                     raw_name, user_gender, category,
                     style=primary_style, season=user_season, occasion=user_occ
                 )
@@ -1417,7 +1803,8 @@ if st.session_state.last_result:
             col_img_area, col_txt = st.columns([1, 1.5])
             with col_img_area:
                 st.markdown(
-                    f'<div class="img-container"><img src="{img_url}"></div>',
+                    f'<div class="img-container"><img src="{img_url}" '
+                    f'onerror="this.onerror=null;this.src=\'{_FALLBACK_SVG_URI}\'"></div>',
                     unsafe_allow_html=True
                 )
         else:
@@ -1453,9 +1840,9 @@ if st.session_state.last_result:
                 search_query = urllib.parse.quote(name_brand)
                 section  = "MAN" if user_gender in ["Male", "男性"] else "WOMAN"
                 zara_url = f"https://www.zara.com/tw/zt/search?searchTerm={search_query}&section={section}"
-                
-                # link_button 直接跳 ZARA，不觸發 rerun，手機也正常
-                st.link_button(t["buy"], zara_url)
+
+                # Task 3：tracked anchor — 開新分頁 + 前端 fetch 記錄 discover_click
+                render_discover_button(t["buy"], zara_url, name_brand)
                 # 渲染時記錄 impression
                 if f"imp_{idx}" not in st.session_state:
                     st.session_state[f"imp_{idx}"] = True
@@ -1563,7 +1950,7 @@ if st.session_state.last_result:
                 if img_url:
                     st.markdown(
                         f'<div class="img-container" style="margin-bottom:0.6rem;">'
-                        f'<img src="{img_url}"></div>',
+                        f'<img src="{img_url}" onerror="this.onerror=null;this.src=\'{_FALLBACK_SVG_URI}\'"></div>',
                         unsafe_allow_html=True
                     )
                 st.markdown(
@@ -1588,6 +1975,16 @@ if st.session_state.last_result:
                         f'color:#777; line-height:1.5; margin-bottom:0.6rem;">{reason}</div>',
                         unsafe_allow_html=True
                     )
+                # ── Task 2：swap 後的 AI 一句話解釋 ──
+                _swap_reason = st.session_state["swap_reasons"].get(f"{slot}_{idx}")
+                if _swap_reason and idx > 0:
+                    st.markdown(
+                        f'<div style="font-family:Inter,sans-serif; font-size:0.7rem; '
+                        f'color:#8a6d5c; line-height:1.5; margin-bottom:0.6rem; '
+                        f'padding:0.5rem 0.7rem; background:#faf6f3; '
+                        f'border-left:2px solid #c9a99a;">✦ AI：{_swap_reason}</div>',
+                        unsafe_allow_html=True
+                    )
                 # 換件按鈕：Padres top 第一件鎖定
                 _lock_top = (slot == "top" and idx == 0 and _is_padres_style)
                 if _lock_top:
@@ -1602,7 +1999,37 @@ if st.session_state.last_result:
                     if st.button(swap_label, key=f"swap_{slot}"):
                         new_idx = (idx + 1) % total
                         st.session_state["builder_idx"][slot] = new_idx
-                        # 不需要清 bimg_ cache，所有圖片預載時已存好
+                        log_event("builder_swap", item_name=opts[new_idx].get("name", ""))
+
+                        # ── Task 2：為換上的單品生成一句 AI 解釋（有 cache 就跳過）──
+                        _reason_key = f"{slot}_{new_idx}"
+                        if _reason_key not in st.session_state["swap_reasons"]:
+                            _new_item = opts[new_idx]
+                            _locked = []
+                            for _s in ("top", "pants", "shoes"):
+                                if _s == slot:
+                                    continue
+                                _o = builder_pool.get(_s, [])
+                                _i = builder_idx.get(_s, 0)
+                                if _o and _i < len(_o):
+                                    _locked.append(_o[_i].get("name", ""))
+                            if lang_select == "繁體中文":
+                                _lang_rule = "用繁體中文回答，一句話、40 字以內，不要引號。"
+                            else:
+                                _lang_rule = "Answer in English, ONE sentence under 25 words, no quotes."
+                            _swap_prompt = (
+                                f"You are a fashion stylist. User: {user_gender}, {user_height}cm, {user_weight}kg. "
+                                f"Outfit kept: {', '.join(_locked) if _locked else 'none'}. "
+                                f"They just swapped their {slot} from '{item.get('name','')}' "
+                                f"to '{_new_item.get('name','')}'. "
+                                f"Explain why this new piece works better for their body and the rest of the outfit. "
+                                f"{_lang_rule}"
+                            )
+                            with st.spinner("AI 正在分析這次換搭..." if lang_select == "繁體中文"
+                                            else "Analyzing this swap..."):
+                                _reason = get_light_completion(_swap_prompt)
+                            if _reason:
+                                st.session_state["swap_reasons"][_reason_key] = _reason
                         st.rerun()
             else:
                 st.markdown(
@@ -1644,28 +2071,72 @@ if st.session_state.last_result:
             st.rerun()
 
     if st.session_state.get("pro_intent_clicked"):
+        # ── Task 4：funnel step 2 — paywall 曝光（只記一次）──
+        if not st.session_state["pro_paywall_viewed"]:
+            st.session_state["pro_paywall_viewed"] = True
+            log_event("pro_paywall_view")
+
         st.markdown(
             '<div style="font-family:Inter,sans-serif; font-size:0.82rem; '
             'color:#555; padding:1rem; border:1px solid #eee; margin-top:0.5rem; '
             'background:#fafafa;">'
-            '🔒 <b>Pro 版功能</b>：一鍵生成完整穿搭 AI 圖像，支援 flat lay 風格與模特展示圖。'
-            '<br>Pro feature coming soon — leave your email to join the waitlist.</div>'
+            '🔒 <b>Pro 版功能</b>：一鍵生成完整穿搭 AI 圖像，支援 flat lay 風格與模特展示圖。</div>'
             if lang_select == "繁體中文" else
             '<div style="font-family:Inter,sans-serif; font-size:0.82rem; '
             'color:#555; padding:1rem; border:1px solid #eee; margin-top:0.5rem; '
             'background:#fafafa;">'
-            '🔒 <b>Pro Feature</b>: Generate a full AI outfit visual — flat lay or model shot — in one click.'
-            '<br>Coming soon. Leave your email to join the waitlist.</div>',
+            '🔒 <b>Pro Feature</b>: Generate a full AI outfit visual — flat lay or model shot — in one click.</div>',
             unsafe_allow_html=True
         )
+
+        # ── 路徑 A：Stripe Payment Link（funnel step 3a — 真實付費意願）──
+        if STRIPE_PAYMENT_LINK:
+            _pay_label = "💳 NT$99 / 月 解鎖 Pro" if lang_select == "繁體中文" else "💳 Unlock Pro — $3.99/mo"
+            col_pay, _ = st.columns([1.5, 2])
+            with col_pay:
+                if st.button(_pay_label, key="stripe_intent_btn", type="primary"):
+                    log_event("stripe_checkout_click")
+                    st.session_state["_show_stripe_link"] = True
+            if st.session_state.get("_show_stripe_link"):
+                st.link_button("→ 前往安全結帳 / Proceed to secure checkout", STRIPE_PAYMENT_LINK)
+
+        # ── 路徑 B：Waitlist（funnel step 3b — 留 email + 價格意願）──
+        _wl_title = "或先加入候補名單：" if lang_select == "繁體中文" else "Or join the waitlist first:"
+        st.caption(_wl_title)
         waitlist_email = st.text_input(
             "Email（選填）" if lang_select == "繁體中文" else "Email (optional)",
             placeholder="your@email.com",
             key="waitlist_email_input"
         )
+        _wtp_label = "你願意為這個功能付多少？" if lang_select == "繁體中文" else "What would you pay for this?"
+        _wtp_opts = (["NT$0（免費才用）", "NT$49/月", "NT$99/月", "NT$199/月"]
+                     if lang_select == "繁體中文"
+                     else ["$0 (free only)", "$1.99/mo", "$3.99/mo", "$6.99/mo"])
+        wtp_choice = st.radio(_wtp_label, _wtp_opts, horizontal=True, key="wtp_radio")
+
         if waitlist_email and st.button("加入候補名單" if lang_select == "繁體中文" else "Join Waitlist"):
-            log_event("waitlist_signup", item_name=waitlist_email)
-            st.success("✓ 已收到！我們會在 Pro 版上線時通知您。" if lang_select == "繁體中文" else "✓ Got it! We'll notify you when Pro launches.")
+            _email_c = waitlist_email.strip().lower()
+            if "@" in _email_c and "." in _email_c:
+                # 寫進專用 waitlist 表（去重 upsert）＋ events 雙保險
+                if sb_url and sb_key:
+                    try:
+                        requests.post(
+                            f"{sb_url}/rest/v1/waitlist",
+                            headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}",
+                                     "Content-Type": "application/json",
+                                     "Prefer": "resolution=merge-duplicates,return=minimal"},
+                            json={"email": _email_c,
+                                  "session_id": st.session_state.session_id,
+                                  "user_id": st.session_state.get("user_id"),
+                                  "willingness_to_pay": wtp_choice},
+                            timeout=3)
+                    except Exception as e:
+                        print(f"[Supabase] waitlist exception: {e}")
+                log_event("waitlist_signup", item_name=_email_c)
+                st.success("✓ 已收到！我們會在 Pro 版上線時通知您。" if lang_select == "繁體中文"
+                           else "✓ Got it! We'll notify you when Pro launches.")
+            else:
+                st.warning("請輸入有效的 Email / Please enter a valid email")
 
     # Feedback
     st.markdown("---")
