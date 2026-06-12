@@ -209,6 +209,9 @@ if "swap_reasons" not in st.session_state:
 # ── Task 4：Pro funnel 狀態 ──
 if "pro_paywall_viewed" not in st.session_state:
     st.session_state["pro_paywall_viewed"] = False
+# ── Image Engine v3：待生成佇列（Generate 設定，定義後執行）──
+if "_pending_image_gen" not in st.session_state:
+    st.session_state["_pending_image_gen"] = None
 
 # 2. 注入自定義 CSS (Minimalist Luxury / ZARA Aesthetic)
 st.markdown("""
@@ -1269,13 +1272,12 @@ elif st.button(t["btn"]):
             st.session_state["builder_pool"] = builder_pool_new
             st.session_state["builder_idx"]  = {"top":0,"pants":0,"shoes":0}
 
-            # ── Image Engine v3：同步生成 3 件主要單品圖（並行，~5-10s）──
-            # 候補池其他單品 lazy：swap 時才生成，省 quota
-            _main_names = [it.get("name", "") for it in result.get("zara_items", [])]
-            _gen_style = user_sty[0] if user_sty else "all"
-            with st.spinner("正在生成商品圖..." if lang_select == "繁體中文"
-                            else "Generating product visuals..."):
-                ensure_item_images(_main_names, user_gender, _gen_style)
+            # ── Image Engine v3：標記待生成（實際生成延後到 Image Engine 定義之後執行）──
+            st.session_state["_pending_image_gen"] = {
+                "names": [it.get("name", "") for it in result.get("zara_items", [])],
+                "gender": user_gender,
+                "style": user_sty[0] if user_sty else "all",
+            }
 
             # ── 方案三：成功後存入 cache（僅限可快取請求）──
             if _is_cacheable and _cache_key:
@@ -1540,6 +1542,14 @@ def resolve_item_image(item_name: str, gender: str, category: str = "others",
 
 
 # ─── Results Display ──────────────────────────────────────────────────────────
+# ─── Image Engine v3：執行待生成佇列（此處函式已定義）──────────────────────
+_pending = st.session_state.get("_pending_image_gen")
+if _pending:
+    st.session_state["_pending_image_gen"] = None
+    with st.spinner("正在生成商品圖..." if lang_select == "繁體中文"
+                    else "Generating product visuals..."):
+        ensure_item_images(_pending["names"], _pending["gender"], _pending["style"])
+
 # 圖片預載：在 get_item_image 定義後執行，Builder 換件時 instant 切換
 if st.session_state.get("builder_pool"):
     _primary_style = user_sty[0] if user_sty else "all"
