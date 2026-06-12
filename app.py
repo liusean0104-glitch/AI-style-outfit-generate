@@ -1326,8 +1326,20 @@ elif st.button(t["btn"]):
 #   目錄飽和後新生成需求趨近於零。
 # 例外：Padres 球衣是真實特定商品，維持 pinned 圖（不交給生成模型）。
 
-IMAGE_MODEL_NAME = "imagen-4.0-fast-generate-001"
-IMAGE_RPD_SOFT_LIMIT = 23   # RPD=25，留 2 緩衝
+# 模型鏈：Imagen 4 Fast（畫質佳但官方文件標明「無免費層、需開 billing」）
+#         → 失敗自動 fallback 到 Nano Banana（gemini-2.5-flash-image，有免費 API 額度）
+IMAGE_MODEL_CHAIN = [
+    {"name": "imagen-4.0-fast-generate-001", "rpd_soft_limit": 23, "kind": "imagen"},
+    {"name": "gemini-2.5-flash-image",       "rpd_soft_limit": 95, "kind": "nano"},
+]
+_IMAGE_BILLING_BLOCKED: set = set()   # 確認需要 billing 的模型，本程序生命週期內直接跳過
+_IMAGE_LAST_ERRORS: list = []         # 最近錯誤（浮上 UI 用）
+
+def _record_image_error(model: str, err: str):
+    _IMAGE_LAST_ERRORS.append(f"{model}: {err[:300]}")
+    if len(_IMAGE_LAST_ERRORS) > 5:
+        _IMAGE_LAST_ERRORS.pop(0)
+    print(f"[ImageGen] {model} error: {err[:300]}")
 
 # 新版 google-genai SDK（Imagen 不走舊 google.generativeai）
 try:
@@ -1358,65 +1370,108 @@ def _build_imagen_prompt(item_name: str, gender: str, style: str) -> str:
     )
 
 
+def _upload_and_cache(item_name: str, img_bytes: bytes, source_tag: str) -> str | None:
+    """共用：圖片 bytes → Storage → item_image_cache 表 → 記憶體 cache。"""
+    key = item_name.lower().strip()
+    path = f"gen_{_hashlib.md5(key.encode()).hexdigest()}.jpg"
+    up = requests.post(
+        f"{sb_url}/storage/v1/object/{SB_IMAGE_BUCKET}/{path}",
+        headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}",
+                 "Content-Type": "image/jpeg", "x-upsert": "true"},
+        data=img_bytes, timeout=15)
+    if not up.ok:
+        _record_image_error("storage", f"{up.status_code} {up.text[:150]}")
+        return None
+    stored_url = f"{sb_url}/storage/v1/object/public/{SB_IMAGE_BUCKET}/{path}"
+    _sb_post("item_image_cache",
+             {"item_name": item_name, "source_url": source_tag, "stored_url": stored_url})
+    _IMG_CACHE[key] = stored_url
+    print(f"[ImageGen] generated: {item_name} via {source_tag}")
+    return stored_url
+
+
+def _call_image_model(model_cfg: dict, api_key: str, prompt: str) -> bytes | None:
+    """依模型種類呼叫對應 API，回傳 jpeg bytes。"""
+    client = genai_new.Client(api_key=api_key)
+    if model_cfg["kind"] == "imagen":
+        resp = client.models.generate_images(
+            model=model_cfg["name"],
+            prompt=prompt,
+            config=genai_types.GenerateImagesConfig(
+                number_of_images=1,
+                aspect_ratio="3:4",
+                output_mime_type="image/jpeg",
+            ),
+        )
+        if resp.generated_images:
+            return resp.generated_images[0].image.image_bytes
+        return None
+    # Nano Banana（gemini-2.5-flash-image）：走 generate_content，image 在 inline_data
+    resp = client.models.generate_content(
+        model=model_cfg["name"],
+        contents=prompt,
+        config=genai_types.GenerateContentConfig(response_modalities=["IMAGE"]),
+    )
+    for cand in (resp.candidates or []):
+        for part in (cand.content.parts or []):
+            if getattr(part, "inline_data", None) and part.inline_data.data:
+                return part.inline_data.data
+    return None
+
+
 def _generate_item_image(item_name: str, gender: str, style: str = "all") -> str | None:
-    """同步生成一張商品圖 → Storage → cache 表。回傳 stored_url 或 None。"""
-    if not _IMAGEN_AVAILABLE or not (sb_url and sb_key) or not ALL_API_KEYS:
+    """
+    同步生成一張商品圖 → Storage → cache 表。回傳 stored_url 或 None。
+    模型鏈：Imagen 4 Fast →（billing/任何錯誤）→ Nano Banana 免費層。
+    確認過需要 billing 的模型整個程序生命週期直接跳過，不重複浪費嘗試。
+    """
+    if not _IMAGEN_AVAILABLE:
+        _record_image_error("sdk", "google-genai 未安裝 — requirements.txt 需新增 google-genai")
+        return None
+    if not (sb_url and sb_key) or not ALL_API_KEYS:
         return None
     key = item_name.lower().strip()
     if key in _IMG_CACHE:               # double-check（並行時可能已被別的 thread 生成）
         return _IMG_CACHE[key]
     prompt = _build_imagen_prompt(item_name, gender, style)
-    for attempt in range(len(ALL_API_KEYS)):
-        key_idx, current_key = _pick_key_for_model(IMAGE_MODEL_NAME, IMAGE_RPD_SOFT_LIMIT)
-        if key_idx is None:
-            print("[Imagen] 所有 Key 今日圖片 RPD 已達軟限")
-            return None
-        try:
-            client = genai_new.Client(api_key=current_key)
-            resp = client.models.generate_images(
-                model=IMAGE_MODEL_NAME,
-                prompt=prompt,
-                config=genai_types.GenerateImagesConfig(
-                    number_of_images=1,
-                    aspect_ratio="3:4",
-                    output_mime_type="image/jpeg",
-                ),
-            )
-            if not resp.generated_images:
-                return None
-            img_bytes = resp.generated_images[0].image.image_bytes
-            with _key_lock:
-                _inc_daily_count(key_idx, IMAGE_MODEL_NAME)
-                count = _daily_count.get((key_idx, IMAGE_MODEL_NAME), 1)
-            _sb_quota_upsert(key_idx, IMAGE_MODEL_NAME, count)
 
-            # 上傳 Storage（沿用 Task 5 管線）
-            path = f"gen_{_hashlib.md5(key.encode()).hexdigest()}.jpg"
-            up = requests.post(
-                f"{sb_url}/storage/v1/object/{SB_IMAGE_BUCKET}/{path}",
-                headers={"apikey": sb_key, "Authorization": f"Bearer {sb_key}",
-                         "Content-Type": "image/jpeg", "x-upsert": "true"},
-                data=img_bytes, timeout=15)
-            if not up.ok:
-                print(f"[Imagen] Storage 上傳失敗 {up.status_code}: {up.text[:120]}")
-                return None
-            stored_url = f"{sb_url}/storage/v1/object/public/{SB_IMAGE_BUCKET}/{path}"
-            _sb_post("item_image_cache",
-                     {"item_name": item_name, "source_url": f"imagen:{IMAGE_MODEL_NAME}",
-                      "stored_url": stored_url})
-            _IMG_CACHE[key] = stored_url
-            print(f"[Imagen] generated: {item_name}")
-            return stored_url
-        except Exception as e:
-            err = str(e)
-            if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                _mark_key_rpm_limited(key_idx, 65)
-                print(f"[Imagen] Key#{key_idx} 429, 換 Key")
-                continue
-            print(f"[Imagen] 生成失敗: {item_name} — {err[:200]}")
-            return None
+    for model_cfg in IMAGE_MODEL_CHAIN:
+        model_name = model_cfg["name"]
+        if model_name in _IMAGE_BILLING_BLOCKED:
+            continue
+        for attempt in range(len(ALL_API_KEYS)):
+            key_idx, current_key = _pick_key_for_model(model_name, model_cfg["rpd_soft_limit"])
+            if key_idx is None:
+                print(f"[ImageGen] 所有 Key 今日 {model_name} RPD 已達軟限 → 下一個模型")
+                break
+            try:
+                img_bytes = _call_image_model(model_cfg, current_key, prompt)
+                if not img_bytes:
+                    _record_image_error(model_name, "回應中沒有圖片（可能被安全過濾）")
+                    break  # 換下一個模型
+                with _key_lock:
+                    _inc_daily_count(key_idx, model_name)
+                    count = _daily_count.get((key_idx, model_name), 1)
+                _sb_quota_upsert(key_idx, model_name, count)
+                return _upload_and_cache(item_name, img_bytes,
+                                         f"gen:{model_name}")
+            except Exception as e:
+                err = str(e)
+                low = err.lower()
+                if "429" in err or "resource_exhausted" in low:
+                    _mark_key_rpm_limited(key_idx, 65)
+                    print(f"[ImageGen] Key#{key_idx} {model_name} 429, 換 Key")
+                    continue  # 同模型換 Key
+                if ("billed" in low or "billing" in low or "permission" in low
+                        or "403" in err or "not found" in low or "404" in err
+                        or "only accessible" in low):
+                    # 這個模型在此帳號等級不可用 → 整個 session 跳過，直接 fallback
+                    _IMAGE_BILLING_BLOCKED.add(model_name)
+                    _record_image_error(model_name, err)
+                    break  # 換下一個模型
+                _record_image_error(model_name, err)
+                break  # 其他錯誤：換下一個模型試
     return None
-
 
 def ensure_item_images(item_names: list[str], gender: str, style: str = "all"):
     """Generate 後同步補齊主要單品圖（並行，最多 3 張，每張各自挑 Key）。"""
@@ -1549,6 +1604,15 @@ if _pending:
     with st.spinner("正在生成商品圖..." if lang_select == "繁體中文"
                     else "Generating product visuals..."):
         ensure_item_images(_pending["names"], _pending["gender"], _pending["style"])
+    # 生成後檢查：有缺圖且有錯誤 → 把真實原因浮上 UI（debug 用，穩定後可移除）
+    _missing = [n for n in _pending["names"]
+                if n and n.lower().strip() not in _IMG_CACHE
+                and not any(pk in n.lower() for pk in PINNED_IMAGES)]
+    if _missing and _IMAGE_LAST_ERRORS:
+        st.warning(
+            f"⚠️ 商品圖生成失敗（{len(_missing)} 件）。最近錯誤：\n\n"
+            f"`{_IMAGE_LAST_ERRORS[-1]}`"
+        )
 
 # 圖片預載：在 get_item_image 定義後執行，Builder 換件時 instant 切換
 if st.session_state.get("builder_pool"):
