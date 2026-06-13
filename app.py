@@ -23,15 +23,29 @@ def get_secret(key, default=None):
         pass
     return os.getenv(key, default)
 
-# ── API Key 列表（KEY_3 優先，KEY_1 備援）──
+# ── 文字模型 Key 池（KEY_3 優先）。Key 1 已抽出專供圖片，不再參與文字輪替 ──
 ALL_API_KEYS = [
     k for k in [
         get_secret("GEMINI_API_KEY_3"),  # 主力 Key
         get_secret("GEMINI_API_KEY_4"),
         get_secret("GEMINI_API_KEY_2"),
-        get_secret("GEMINI_API_KEY"),    # 原 Key 1 降為最後備援
     ] if k
 ]
+
+# ── 圖片專用 Key（Key 1，已開 billing）：只跑 Imagen 4 Fast / Nano Banana，
+#    完全不混入上面的文字模型輪替，避免付費 key 被文字請求燒額度。──
+#    優先讀專用 secret GEMINI_API_KEY_IMAGE；migration 期間若尚未建立，
+#    回退到舊的 GEMINI_API_KEY（即原 Key 1）以免圖片功能中斷。
+IMAGE_API_KEY = get_secret("GEMINI_API_KEY_IMAGE") or get_secret("GEMINI_API_KEY")
+
+# 啟動時印出圖片 Key 前綴（只印前 8 碼，不外洩完整 key），方便確認
+# 是否為預期那把（Google AI Studio 的 key 通常是 AIzaSyD... 開頭）。
+print(
+    "[ImageKey] GEMINI_API_KEY_IMAGE prefix="
+    + ((IMAGE_API_KEY[:8] + "…") if IMAGE_API_KEY else "NONE (未設定)")
+    + (" ✓ 符合 AIzaSyD 開頭" if (IMAGE_API_KEY or "").startswith("AIzaSyD")
+       else " ⚠ 非 AIzaSyD 開頭，請確認是否貼錯 key")
+)
 
 # ── 模型優先序 + RPD Soft Limit（達到閾值主動換 Key，不等 429）──
 MODEL_TIERS = [
@@ -808,11 +822,17 @@ def get_ai_recommendation(gender, height, weight, season, occ, wea, sty, lang, u
         f"}}\n"
         f"Each option object in top_options / pants_options / shoes_options MUST be:\n"
         f"{{\n"
-        f"  \"name\": \"ZARA [Item Name]\",\n"
+        f"  \"name\": \"[garment description ONLY — NO brand name]\",\n"
         f"  \"reason\": \"Reason why this fits their physique.\",\n"
         f"  \"price_range\": \"Estimated price range\",\n"
         f"  \"recommended_size\": \"Calculated size (e.g. S, M, L, XL, EU 42) based on user's height/weight\"\n"
         f"}}\n"
+        f"NAME RULE (CRITICAL): The 'name' of every top/pants/shoes option MUST be a plain garment "
+        f"description with NO brand prefix whatsoever — do NOT write 'ZARA', 'UNIQLO', 'GU', 'H&M', "
+        f"'Uniqlo U', etc. Describe by item type + cut + colour + fabric only. "
+        f"Good: '寬版米色亞麻襯衫' / 'Wide-fit Beige Linen Shirt'. "
+        f"Bad: 'ZARA 寬版襯衫' / 'UNIQLO U AIRISM T-Shirt'. "
+        f"Brand names are allowed ONLY inside the 'other_brands' list, never here.\n"
         f"CRITICAL: EXACTLY 3 options per category, ordered best-first. The three options within a "
         f"category must be meaningfully different (cut / color / fabric), yet EACH must coordinate "
         f"with the first option of the other two categories. Also 4-5 'other_brands', 2 'accessories'.\n"
@@ -945,18 +965,20 @@ def get_single_item_swap(
         f"User: Gender={gender}, Height={height}cm, Weight={weight}kg. "
         f"Context: Season={season}, Occasion={occ}, Weather={wea}, Style={sty_str}.\n"
         f"{locked_desc}\n"
-        f"TASK: Suggest ONE new ZARA item for category: {cat_label}.\n"
+        f"TASK: Suggest ONE new item (sourced from affordable brands like ZARA) for category: {cat_label}.\n"
         f"It must coordinate with the locked items above. Different from any item already mentioned.\n"
         f"LANGUAGE: Respond in {lang}.\n"
         f"CURRENCY: {currency_instruction}\n"
         f"Return ONLY valid JSON (no markdown):\n"
         f"{{\n"
-        f"  \"name\": \"ZARA [item name]\",\n"
+        f"  \"name\": \"[garment description ONLY — NO brand name]\",\n"
         f"  \"reason\": \"Why this fits physique and coordinates with locked items.\",\n"
         f"  \"category\": \"{category}\",\n"
         f"  \"price_range\": \"estimated price\",\n"
         f"  \"recommended_size\": \"size based on height/weight\"\n"
         f"}}\n"
+        f"NAME RULE (CRITICAL): 'name' MUST be a plain garment description with NO brand prefix "
+        f"(no 'ZARA', 'UNIQLO', 'GU', 'H&M', etc.). Describe by item type + cut + colour + fabric only.\n"
     )
 
     import re, json
@@ -1341,6 +1363,75 @@ def _record_image_error(model: str, err: str):
         _IMAGE_LAST_ERRORS.pop(0)
     print(f"[ImageGen] {model} error: {err[:300]}")
 
+# ── 品牌前綴剝除（消費端防護網）────────────────────────────────────────────
+# 即使 prompt 已要求「不要品牌名」，模型偶爾仍會硬塞品牌前綴。為確保
+#   (1) Discover 的 ZARA 搜尋字串乾淨、不錯配
+#   (2) image cache key 收斂（同類單品名稱一致 → 命中率高、生成成本低）
+# 一律在「拿名稱去搜尋 / 當 cache key」前剝除已知平價品牌前綴。
+# 例外：Padres / 教士隊球衣為 pinned 真實商品，完整保留。
+_BRAND_PREFIXES = [
+    "uniqlo u", "pull & bear", "pull&bear", "new balance", "無印良品",
+    "uniqlo", "zara", "gu", "h&m", "hm", "muji", "net", "lativ",
+    "bershka", "mango", "cos", "everlane", "gap", "adidas", "nike",
+]
+
+def _strip_brand(name: str) -> str:
+    """移除單品名稱開頭的品牌前綴；Padres/教士隊球衣不動。"""
+    if not name:
+        return name
+    raw = name.strip()
+    low = raw.lower()
+    if "padres" in low or "教士隊" in low:
+        return raw
+    # 長前綴優先（"uniqlo u" 要在 "uniqlo" 之前命中）
+    for b in sorted(_BRAND_PREFIXES, key=len, reverse=True):
+        if low.startswith(b + " "):
+            return raw[len(b):].strip(" -–—:：·")
+    return raw
+
+def _img_key_norm(name: str) -> str:
+    """image cache 統一 key：剝品牌 + 轉小寫 + 去空白。生成/查詢/載入都用它。"""
+    return _strip_brand(name).lower().strip()
+
+# ── 每日張數硬上限（防爆預算）──────────────────────────────────────────────
+# Imagen 4 Fast $0.02/張；預設 50 張/天 ≈ $1/天封頂。可用 secret 覆寫。
+# 註：此計數為 in-process（重啟歸零），但 item_image_cache 全域永久快取
+#     已讓「每個單品全站只生成一次」，真實花費上限由目錄大小決定；
+#     此硬上限為防止異常迴圈失控的第二道保險。
+try:
+    IMAGE_DAILY_HARD_CAP = int(get_secret("IMAGE_DAILY_HARD_CAP", "50"))
+except (TypeError, ValueError):
+    IMAGE_DAILY_HARD_CAP = 50
+_image_daily_count = 0
+_image_daily_date = None
+
+def _image_cap_remaining() -> int:
+    global _image_daily_count, _image_daily_date
+    today = _today_pt()
+    if _image_daily_date != today:
+        _image_daily_count = 0
+        _image_daily_date = today
+    return IMAGE_DAILY_HARD_CAP - _image_daily_count
+
+def _image_cap_reserve() -> bool:
+    """生成前預扣一格；回傳 False 代表今日已達上限。失敗時用 _image_cap_refund 退還。"""
+    global _image_daily_count, _image_daily_date
+    with _key_lock:
+        today = _today_pt()
+        if _image_daily_date != today:
+            _image_daily_count = 0
+            _image_daily_date = today
+        if _image_daily_count >= IMAGE_DAILY_HARD_CAP:
+            return False
+        _image_daily_count += 1
+        return True
+
+def _image_cap_refund():
+    global _image_daily_count
+    with _key_lock:
+        if _image_daily_count > 0:
+            _image_daily_count -= 1
+
 # 新版 google-genai SDK（Imagen 不走舊 google.generativeai）
 try:
     from google import genai as genai_new
@@ -1362,9 +1453,10 @@ PINNED_IMAGES = {
 def _build_imagen_prompt(item_name: str, gender: str, style: str) -> str:
     g = "men's" if gender not in ("Female", "女性") else "women's"
     style_hint = f", {style} aesthetic" if style and style != "all" else ""
+    clean_item = _strip_brand(item_name)
     return (
         f"Professional e-commerce product photography of a single {g} fashion item: "
-        f"{item_name}{style_hint}. The garment only, no model, no mannequin, "
+        f"{clean_item}{style_hint}. The garment only, no model, no mannequin, "
         f"laid flat or hanging, centered, soft studio lighting, "
         f"clean light beige background, minimalist ZARA catalog style, photorealistic."
     )
@@ -1372,7 +1464,7 @@ def _build_imagen_prompt(item_name: str, gender: str, style: str) -> str:
 
 def _upload_and_cache(item_name: str, img_bytes: bytes, source_tag: str) -> str | None:
     """共用：圖片 bytes → Storage → item_image_cache 表 → 記憶體 cache。"""
-    key = item_name.lower().strip()
+    key = _img_key_norm(item_name)
     path = f"gen_{_hashlib.md5(key.encode()).hexdigest()}.jpg"
     up = requests.post(
         f"{sb_url}/storage/v1/object/{SB_IMAGE_BUCKET}/{path}",
@@ -1384,9 +1476,9 @@ def _upload_and_cache(item_name: str, img_bytes: bytes, source_tag: str) -> str 
         return None
     stored_url = f"{sb_url}/storage/v1/object/public/{SB_IMAGE_BUCKET}/{path}"
     _sb_post("item_image_cache",
-             {"item_name": item_name, "source_url": source_tag, "stored_url": stored_url})
+             {"item_name": key, "source_url": source_tag, "stored_url": stored_url})
     _IMG_CACHE[key] = stored_url
-    print(f"[ImageGen] generated: {item_name} via {source_tag}")
+    print(f"[ImageGen] generated: {item_name} → key='{key}' via {source_tag}")
     return stored_url
 
 
@@ -1422,64 +1514,68 @@ def _call_image_model(model_cfg: dict, api_key: str, prompt: str) -> bytes | Non
 def _generate_item_image(item_name: str, gender: str, style: str = "all") -> str | None:
     """
     同步生成一張商品圖 → Storage → cache 表。回傳 stored_url 或 None。
-    模型鏈：Imagen 4 Fast →（billing/任何錯誤）→ Nano Banana 免費層。
-    確認過需要 billing 的模型整個程序生命週期直接跳過，不重複浪費嘗試。
+    Key：專用 IMAGE_API_KEY（Key 1，已開 billing），完全不碰文字模型 Key 池。
+    模型鏈：Imagen 4 Fast →（billing/任何錯誤）→ Nano Banana。
+    每日張數硬上限 IMAGE_DAILY_HARD_CAP 防爆預算（未成功產圖會退還格子）。
     """
     if not _IMAGEN_AVAILABLE:
         _record_image_error("sdk", "google-genai 未安裝 — requirements.txt 需新增 google-genai")
         return None
-    if not (sb_url and sb_key) or not ALL_API_KEYS:
+    if not (sb_url and sb_key):
         return None
-    key = item_name.lower().strip()
+    if not IMAGE_API_KEY:
+        _record_image_error("config", "未設定 GEMINI_API_KEY_IMAGE（或舊的 GEMINI_API_KEY）")
+        return None
+    key = _img_key_norm(item_name)
     if key in _IMG_CACHE:               # double-check（並行時可能已被別的 thread 生成）
         return _IMG_CACHE[key]
-    prompt = _build_imagen_prompt(item_name, gender, style)
 
-    for model_cfg in IMAGE_MODEL_CHAIN:
-        model_name = model_cfg["name"]
-        if model_name in _IMAGE_BILLING_BLOCKED:
-            continue
-        for attempt in range(len(ALL_API_KEYS)):
-            key_idx, current_key = _pick_key_for_model(model_name, model_cfg["rpd_soft_limit"])
-            if key_idx is None:
-                print(f"[ImageGen] 所有 Key 今日 {model_name} RPD 已達軟限 → 下一個模型")
-                break
+    # 每日硬上限：先預扣一格；本次未實際產圖時於 finally 退還
+    if not _image_cap_reserve():
+        _record_image_error("cap", f"今日已達每日生成上限 {IMAGE_DAILY_HARD_CAP} 張，暫停生成（防爆預算）")
+        return None
+
+    prompt = _build_imagen_prompt(item_name, gender, style)
+    produced = False
+    try:
+        for model_cfg in IMAGE_MODEL_CHAIN:
+            model_name = model_cfg["name"]
+            if model_name in _IMAGE_BILLING_BLOCKED:
+                continue
             try:
-                img_bytes = _call_image_model(model_cfg, current_key, prompt)
+                img_bytes = _call_image_model(model_cfg, IMAGE_API_KEY, prompt)
                 if not img_bytes:
                     _record_image_error(model_name, "回應中沒有圖片（可能被安全過濾）")
-                    break  # 換下一個模型
-                with _key_lock:
-                    _inc_daily_count(key_idx, model_name)
-                    count = _daily_count.get((key_idx, model_name), 1)
-                _sb_quota_upsert(key_idx, model_name, count)
-                return _upload_and_cache(item_name, img_bytes,
-                                         f"gen:{model_name}")
+                    continue  # 換下一個模型
+                produced = True
+                used = IMAGE_DAILY_HARD_CAP - _image_cap_remaining()
+                print(f"[Quota] image {model_name} today={used}/{IMAGE_DAILY_HARD_CAP}")
+                return _upload_and_cache(item_name, img_bytes, f"gen:{model_name}")
             except Exception as e:
                 err = str(e)
                 low = err.lower()
-                if "429" in err or "resource_exhausted" in low:
-                    _mark_key_rpm_limited(key_idx, 65)
-                    _record_image_error(model_name, f"Key#{key_idx} quota/429: {err[:150]}")
-                    continue  # 同模型換 Key
                 if ("billed" in low or "billing" in low or "paid plan" in low
                         or "permission" in low or "upgrade your account" in low
                         or "403" in err or "not found" in low or "404" in err
                         or "only accessible" in low):
-                    # 這個模型在此帳號等級不可用 → 整個 session 跳過，直接 fallback
+                    # 此模型在此帳號等級不可用 → 整個 session 跳過，直接 fallback 下一個模型
                     _IMAGE_BILLING_BLOCKED.add(model_name)
                     _record_image_error(model_name, err)
-                    break  # 換下一個模型
+                    continue
+                # 429 / 其他錯誤：圖片只有單一專用 key，無從換 key → 換下一個模型試
                 _record_image_error(model_name, err)
-                break  # 其他錯誤：換下一個模型試
-    return None
+                continue
+        return None
+    finally:
+        if not produced:
+            _image_cap_refund()
 
 def ensure_item_images(item_names: list[str], gender: str, style: str = "all"):
-    """Generate 後同步補齊主要單品圖（並行，最多 3 張，每張各自挑 Key）。"""
+    """Generate 後同步補齊主要單品圖（並行，最多 3 張，共用專用圖片 Key）。"""
     _load_image_cache_once()
     todo = [n for n in item_names
-            if n and n.lower().strip() not in _IMG_CACHE
-            and n.lower().strip() not in PINNED_IMAGES]
+            if n and _img_key_norm(n) not in _IMG_CACHE
+            and _img_key_norm(n) not in PINNED_IMAGES]
     if not todo:
         return
     import concurrent.futures as _cf
@@ -1520,14 +1616,14 @@ def _load_image_cache_once():
     rows = _sb_get("item_image_cache", {"select": "item_name,stored_url", "limit": "2000"})
     for r in rows:
         if r.get("item_name") and r.get("stored_url"):
-            _IMG_CACHE[r["item_name"].lower()] = r["stored_url"]
+            _IMG_CACHE[_img_key_norm(r["item_name"])] = r["stored_url"]
     _IMG_CACHE_LOADED = True
     print(f"[ImageCache] loaded {len(_IMG_CACHE)} cached images")
 
 
 def _warm_image_to_storage(item_name: str, source_url: str):
     """背景執行：抓圖 → 上傳 Storage（x-upsert）→ 寫 cache 表 → 更新記憶體 dict。"""
-    key = item_name.lower()
+    key = _img_key_norm(item_name)
     try:
         resp = requests.get(source_url, timeout=8, headers={
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/537.36",
@@ -1568,9 +1664,9 @@ def resolve_item_image(item_name: str, gender: str, category: str = "others",
     4. 都沒有 → SVG placeholder（generate=False 的 lazy 場景）
     """
     _load_image_cache_once()
-    key = item_name.lower().strip()
+    key = _img_key_norm(item_name)
 
-    # 1. Pinned（含子字串比對：AI 輸出常帶前綴）
+    # 1. Pinned（含子字串比對：AI 輸出常帶前綴）。_img_key_norm 保留 Padres/教士隊字樣。
     for pk, purl in PINNED_IMAGES.items():
         if pk in key:
             cached = _IMG_CACHE.get(pk)
@@ -1607,7 +1703,7 @@ if _pending:
         ensure_item_images(_pending["names"], _pending["gender"], _pending["style"])
     # 生成後檢查：有缺圖且有錯誤 → 把真實原因浮上 UI（debug 用，穩定後可移除）
     _missing = [n for n in _pending["names"]
-                if n and n.lower().strip() not in _IMG_CACHE
+                if n and _img_key_norm(n) not in _IMG_CACHE
                 and not any(pk in n.lower() for pk in PINNED_IMAGES)]
     if _missing and _IMAGE_LAST_ERRORS:
         _err_lines = "\n\n".join(f"`{e}`" for e in _IMAGE_LAST_ERRORS[-3:])
@@ -1691,6 +1787,10 @@ if st.session_state.last_result:
                 name_brand = part1 if not has_chinese_p1 else (part2 if not has_chinese_p2 else raw_name)
         else:
             name_brand = raw_name
+
+        # 防護網：即使 prompt 已要求無品牌，模型偶爾仍會塞品牌前綴 →
+        # 在這裡剝除，確保顯示名稱乾淨、且下方 ZARA 搜尋字串不錯配。
+        name_brand = _strip_brand(name_brand)
 
         # 圖片 cache：避免每次按鈕 rerun 重新搜尋
         img_cache_key = f"img_{idx}"
