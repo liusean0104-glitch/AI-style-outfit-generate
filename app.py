@@ -308,19 +308,19 @@ st.markdown("""
         border-radius: 0px !important;
     }
 
-    /* Image container — clean, no spinner */
+    /* Image container — show COMPLETE item, never crop (contain) */
     .img-container {
         width: 100%;
         aspect-ratio: 3/4;
         overflow: hidden;
         border: 1px solid #f0f0f0;
-        background-color: #f9f9f9;
+        background-color: #ffffff;
         position: relative;
     }
     .img-container img {
         width: 100%;
         height: 100%;
-        object-fit: cover;
+        object-fit: contain;
         display: block;
     }
 
@@ -1461,8 +1461,9 @@ def _build_imagen_prompt(item_name: str, gender: str, style: str) -> str:
         f"Professional e-commerce product photograph of ONE single {g} clothing item: {clean_item}. "
         f"Render the garment EXACTLY as described — match the stated colour, collar type, sleeve "
         f"length, fit and silhouette precisely. "
-        f"Front-facing view, garment fully flattened and centered, the entire item visible inside the "
-        f"frame with a little margin. "
+        f"Front-facing view, garment fully flattened and centered. Zoom OUT so the COMPLETE item "
+        f"is fully inside the frame with generous empty margin on all four sides — the item must NOT "
+        f"touch, overflow or be cropped by any edge. "
         f"Pure seamless pure-white studio background (#FFFFFF), bright even soft lighting, no harsh "
         f"shadows, no gradient. "
         f"Invisible ghost-mannequin style: NO visible mannequin, NO human, NO body parts, NO face, "
@@ -1519,6 +1520,79 @@ def _call_image_model(model_cfg: dict, api_key: str, prompt: str) -> bytes | Non
             if getattr(part, "inline_data", None) and part.inline_data.data:
                 return part.inline_data.data
     return None
+
+
+# ── Pro 合體穿搭：Nano Banana 2（多模態，吃多張商品圖合成一張）──────────────
+OUTFIT_COMPOSITE_MODEL = "gemini-3.1-flash-image-preview"  # Nano Banana 2
+
+def _composite_prompt(gender: str, mode: str) -> str:
+    g = "men's" if gender not in ("Female", "女性") else "women's"
+    if mode == "model":
+        return (
+            f"Combine the clothing items shown in the provided images into one coordinated {g} "
+            f"outfit, worn together by a single stylized fashion mannequin (not a real, identifiable "
+            f"person), full-body front view, neutral light studio background, soft even lighting, "
+            f"photorealistic fashion-catalog style. Keep each garment faithful to its reference image."
+        )
+    return (
+        f"Arrange the clothing items shown in the provided images into one stylish {g} flat lay "
+        f"outfit, composed top-to-bottom (top, then bottoms, then shoes), neatly laid flat on a "
+        f"clean white background, soft even lighting, minimalist magazine-catalogue style, "
+        f"photorealistic. Keep each garment faithful to its reference image."
+    )
+
+def generate_outfit_composite(image_urls: list[str], gender: str, mode: str = "flatlay") -> bytes | None:
+    """把目前穿搭的多張商品圖合成一張（mode='flatlay' 平鋪 / 'model' 模特）。失敗回 None。"""
+    if not _IMAGEN_AVAILABLE:
+        _record_image_error("composite", "google-genai 未安裝")
+        return None
+    if not IMAGE_API_KEY:
+        _record_image_error("composite", "未設定 GEMINI_API_KEY_IMAGE")
+        return None
+    real_urls = [u for u in image_urls if u and u.startswith("http")]
+    if len(real_urls) < 2:
+        _record_image_error("composite", "可用商品圖不足（需至少 2 張真實商品圖）")
+        return None
+    if not _image_cap_reserve():
+        _record_image_error("composite", f"今日已達生成上限 {IMAGE_DAILY_HARD_CAP} 張（防爆預算）")
+        return None
+    produced = False
+    try:
+        parts = []
+        for u in real_urls:
+            try:
+                r = requests.get(u, timeout=8)
+                if r.ok and r.content:
+                    mime = (r.headers.get("Content-Type", "image/jpeg") or "image/jpeg").split(";")[0]
+                    if not mime.startswith("image/"):
+                        mime = "image/jpeg"
+                    parts.append(genai_types.Part.from_bytes(data=r.content, mime_type=mime))
+            except Exception as e:
+                print(f"[Composite] fetch fail {u}: {e}")
+        if len(parts) < 2:
+            _record_image_error("composite", "商品圖下載失敗（至少需 2 張）")
+            return None
+        parts.append(_composite_prompt(gender, mode))
+        client = genai_new.Client(api_key=IMAGE_API_KEY)
+        resp = client.models.generate_content(
+            model=OUTFIT_COMPOSITE_MODEL,
+            contents=parts,
+            config=genai_types.GenerateContentConfig(response_modalities=["IMAGE"]),
+        )
+        for cand in (resp.candidates or []):
+            for part in (cand.content.parts or []):
+                if getattr(part, "inline_data", None) and part.inline_data.data:
+                    produced = True
+                    print(f"[Composite] generated mode={mode} from {len(parts)-1} items")
+                    return part.inline_data.data
+        _record_image_error("composite", "回應沒有圖片（模特模式較易被安全過濾，可改試 flat lay）")
+        return None
+    except Exception as e:
+        _record_image_error("composite", str(e))
+        return None
+    finally:
+        if not produced:
+            _image_cap_refund()
 
 
 def _generate_item_image(item_name: str, gender: str, style: str = "all") -> str | None:
@@ -1999,16 +2073,6 @@ if st.session_state.last_result:
                         f'color:#777; line-height:1.5; margin-bottom:0.6rem;">{reason}</div>',
                         unsafe_allow_html=True
                     )
-                # ── Task 2：swap 後的 AI 一句話解釋 ──
-                _swap_reason = st.session_state["swap_reasons"].get(f"{slot}_{idx}")
-                if _swap_reason and idx > 0:
-                    st.markdown(
-                        f'<div style="font-family:Inter,sans-serif; font-size:0.7rem; '
-                        f'color:#8a6d5c; line-height:1.5; margin-bottom:0.6rem; '
-                        f'padding:0.5rem 0.7rem; background:#faf6f3; '
-                        f'border-left:2px solid #c9a99a;">✦ AI：{_swap_reason}</div>',
-                        unsafe_allow_html=True
-                    )
                 # 換件按鈕：Padres top 第一件鎖定
                 _lock_top = (slot == "top" and idx == 0 and _is_padres_style)
                 if _lock_top:
@@ -2038,35 +2102,9 @@ if st.session_state.last_result:
                                 )
                             st.session_state[_bimg_key] = _gen_url
 
-                        # ── Task 2：為換上的單品生成一句 AI 解釋（有 cache 就跳過）──
-                        _reason_key = f"{slot}_{new_idx}"
-                        if _reason_key not in st.session_state["swap_reasons"]:
-                            _new_item = opts[new_idx]
-                            _locked = []
-                            for _s in ("top", "pants", "shoes"):
-                                if _s == slot:
-                                    continue
-                                _o = builder_pool.get(_s, [])
-                                _i = builder_idx.get(_s, 0)
-                                if _o and _i < len(_o):
-                                    _locked.append(_o[_i].get("name", ""))
-                            if lang_select == "繁體中文":
-                                _lang_rule = "用繁體中文回答，一句話、40 字以內，不要引號。"
-                            else:
-                                _lang_rule = "Answer in English, ONE sentence under 25 words, no quotes."
-                            _swap_prompt = (
-                                f"You are a fashion stylist. User: {user_gender}, {user_height}cm, {user_weight}kg. "
-                                f"Outfit kept: {', '.join(_locked) if _locked else 'none'}. "
-                                f"They just swapped their {slot} from '{item.get('name','')}' "
-                                f"to '{_new_item.get('name','')}'. "
-                                f"Explain why this new piece works better for their body and the rest of the outfit. "
-                                f"{_lang_rule}"
-                            )
-                            with st.spinner("AI 正在分析這次換搭..." if lang_select == "繁體中文"
-                                            else "Analyzing this swap..."):
-                                _reason = get_light_completion(_swap_prompt)
-                            if _reason:
-                                st.session_state["swap_reasons"][_reason_key] = _reason
+                        # 已移除每次 swap 的 flash-lite 一句話解釋：
+                        # 候補單品本身已帶 reason（上方已顯示），不需再呼叫文字模型，
+                        # 換件因此不再吃文字 rate limit，也省下 flash-lite 的等待時間。
                         st.rerun()
             else:
                 st.markdown(
@@ -2113,18 +2151,51 @@ if st.session_state.last_result:
             st.session_state["pro_paywall_viewed"] = True
             log_event("pro_paywall_view")
 
-        st.markdown(
-            '<div style="font-family:Inter,sans-serif; font-size:0.82rem; '
-            'color:#555; padding:1rem; border:1px solid #eee; margin-top:0.5rem; '
-            'background:#fafafa;">'
-            '🔒 <b>Pro 版功能</b>：一鍵生成完整穿搭 AI 圖像，支援 flat lay 風格與模特展示圖。</div>'
-            if lang_select == "繁體中文" else
-            '<div style="font-family:Inter,sans-serif; font-size:0.82rem; '
-            'color:#555; padding:1rem; border:1px solid #eee; margin-top:0.5rem; '
-            'background:#fafafa;">'
-            '🔒 <b>Pro Feature</b>: Generate a full AI outfit visual — flat lay or model shot — in one click.</div>',
-            unsafe_allow_html=True
-        )
+        # ── 合體穿搭：實際生成（Nano Banana 2，多模態吃目前穿搭的商品圖）──
+        _cmp_intro = ("把這套穿搭合成一張圖：" if lang_select == "繁體中文"
+                      else "Combine this outfit into one image:")
+        st.markdown(f"**{_cmp_intro}**")
+        _mode_opts = (["平鋪 Flat lay", "模特展示"] if lang_select == "繁體中文"
+                      else ["Flat lay", "On a model"])
+        _mode_choice = st.radio("composite_mode", _mode_opts, horizontal=True,
+                                key="composite_mode", label_visibility="collapsed")
+        _mode = "model" if _mode_choice in ("模特展示", "On a model") else "flatlay"
+
+        _gen_label = "✨ 生成合體穿搭圖" if lang_select == "繁體中文" else "✨ Generate composite"
+        col_cmp, _ = st.columns([1.5, 2])
+        with col_cmp:
+            if st.button(_gen_label, key="composite_gen_btn", type="primary"):
+                _idxs = st.session_state.get("builder_idx", {"top": 0, "pants": 0, "shoes": 0})
+                _outfit_urls = [st.session_state.get(f"bimg_{_s}_{_idxs.get(_s, 0)}")
+                                for _s in ["top", "pants", "shoes"]]
+                log_event("composite_generate", item_name=_mode)
+                with st.spinner("AI 正在合成穿搭圖…（約 10 秒）" if lang_select == "繁體中文"
+                                else "Composing your outfit… (~10s)"):
+                    _cbytes = generate_outfit_composite(_outfit_urls, user_gender, _mode)
+                st.session_state["_composite_bytes"] = _cbytes
+                if not _cbytes:
+                    _cerr = _IMAGE_LAST_ERRORS[-1] if _IMAGE_LAST_ERRORS else ""
+                    st.warning(
+                        ("合成失敗，請稍後再試，或改用 flat lay 模式。" if lang_select == "繁體中文"
+                         else "Generation failed — try again, or switch to flat lay.")
+                        + (f"\n\n`{_cerr}`" if _cerr else "")
+                    )
+
+        if st.session_state.get("_composite_bytes"):
+            st.image(st.session_state["_composite_bytes"], use_container_width=True)
+            st.download_button(
+                "⬇ 下載圖片" if lang_select == "繁體中文" else "⬇ Download image",
+                data=st.session_state["_composite_bytes"],
+                file_name="outfit_composite.png",
+                mime="image/png",
+                key="composite_dl_btn",
+            )
+
+        st.markdown("---")
+        _unlock_hint = ("喜歡嗎？升級 Pro 解鎖無限生成與高畫質輸出："
+                        if lang_select == "繁體中文"
+                        else "Like it? Upgrade to Pro for unlimited generations & HD output:")
+        st.caption(_unlock_hint)
 
         # ── 路徑 A：Stripe Payment Link（funnel step 3a — 真實付費意願）──
         if STRIPE_PAYMENT_LINK:
