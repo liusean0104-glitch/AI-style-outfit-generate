@@ -11,6 +11,41 @@ import requests
 import asyncio
 import time
 
+def _countdown_html(total_secs: int, lang: str) -> str:
+    """瀏覽器端平滑倒數（setInterval，每秒 -1，不會跳秒）。涵蓋文字+圖片兩階段。"""
+    if lang == "繁體中文":
+        title = "Curating Your Style"
+        tips = ["正在分析您的身形比例…", "正在挑選季度單品…", "正在優化剪裁平衡…",
+                "正在注入簡約美學…", "您的專屬提案即將呈現…"]
+        final_txt = "即將完成…"
+    else:
+        title = "Curating Your Style"
+        tips = ["Analyzing your body proportions...", "Selecting seasonal pieces...",
+                "Balancing garment cut...", "Injecting minimalist aesthetics...",
+                "Your curated style is almost ready..."]
+        final_txt = "Almost ready..."
+    return f"""
+    <div style="font-family:'Inter',sans-serif;text-align:center;padding:1.8rem 1rem;">
+      <div style="font-size:0.95rem;letter-spacing:4px;text-transform:uppercase;color:#111;font-weight:600;">{title}</div>
+      <div id="cdtip" style="font-size:0.8rem;color:#999;margin-top:1.1rem;min-height:1.2em;">{tips[0]}</div>
+      <div id="cdnum" style="font-size:0.72rem;letter-spacing:3px;color:#000;margin-top:1.1rem;font-weight:600;">{total_secs}s</div>
+    </div>
+    <script>
+      var t = {total_secs};
+      var tips = {json.dumps(tips, ensure_ascii=False)};
+      var finalTxt = {json.dumps(final_txt, ensure_ascii=False)};
+      var ti = 0;
+      var numEl = document.getElementById('cdnum');
+      var tipEl = document.getElementById('cdtip');
+      var iv = setInterval(function() {{
+        t -= 1;
+        if (t > 0) {{ numEl.textContent = t + 's'; }}
+        else {{ numEl.textContent = ''; tipEl.textContent = finalTxt; clearInterval(iv); }}
+      }}, 1000);
+      setInterval(function() {{ ti = (ti + 1) % tips.length; tipEl.textContent = tips[ti]; }}, 2600);
+    </script>
+    """
+
 # 1. 載入與設定
 load_dotenv(override=True)
 
@@ -226,6 +261,7 @@ if "pro_paywall_viewed" not in st.session_state:
 # ── Image Engine v3：待生成佇列（Generate 設定，定義後執行）──
 if "_pending_image_gen" not in st.session_state:
     st.session_state["_pending_image_gen"] = None
+ui_placeholder = None   # 倒數 placeholder（跨 generate→圖片生成 兩段，最後統一清除）
 
 # 2. 注入自定義 CSS (Minimalist Luxury / ZARA Aesthetic)
 st.markdown("""
@@ -1216,29 +1252,12 @@ elif st.button(t["btn"]):
         st.session_state.last_result = _cached_result
         st.rerun()
     else:
-        # Luxury Curating UI Setup
-        TIPS = {
-            "繁體中文": [
-                "正在分析您的身形比例...",
-                "正在挑選 ZARA 季度單品...",
-                "正在優化服裝剪裁平衡...",
-                "正在注入法式簡約美學...",
-                "您的專屬時尚提案即將呈現..."
-            ],
-            "English": [
-                "Analyzing your body proportions...",
-                "Selecting seasonal ZARA pieces...",
-                "Optimizing garment cut balance...",
-                "Injecting minimalist aesthetics...",
-                "Your curated style is almost ready..."
-            ]
-        }
-        tips = TIPS[lang_select]
+        # 單一平滑倒數（瀏覽器端 JS，每秒 -1 不跳秒）：涵蓋「文字生成 + 商品圖生成」共 30 秒
         ui_placeholder = st.empty()
+        with ui_placeholder.container():
+            components.html(_countdown_html(30, lang_select), height=190)
 
         import concurrent.futures
-
-        # Show animated luxury loading UI while calling the API
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(
                 get_ai_recommendation,
@@ -1246,30 +1265,10 @@ elif st.button(t["btn"]):
                 user_occ, user_wea, user_sty, lang_select, uploaded_file,
                 user_custom_prompt, _personal_ctx
             )
-            tip_idx = 0
             start_time = time.time()
-            expected_seconds = 25  # Increased for multi-modal analysis and image search
-
-            while not future.done():
-                elapsed = time.time() - start_time
-                remaining = max(1, int(expected_seconds - elapsed))
-                timer_text = f"ETA: {remaining}s" if elapsed < expected_seconds else "Finalizing..."
-
-                with ui_placeholder.container():
-                    st.markdown(f"""
-                    <div class="curating-container">
-                        <div class="curating-title">Curating Your Style</div>
-                        <div class="scanning-line"></div>
-                        <div class="loading-tip">{tips[tip_idx % len(tips)]}</div>
-                        <div style="font-family: 'Inter', sans-serif; font-size: 0.7rem; letter-spacing: 3px; color: #000; margin-top: 1.5rem; font-weight: 600;">
-                            {timer_text}
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                tip_idx += 1
-                time.sleep(1.5)
-            ui_placeholder.empty()
             result, err = future.result()
+        # 倒數 placeholder 不在此清除 → 留到下方商品圖生成完一起清，
+        # 讓這 30 秒倒數同時涵蓋文字與圖片兩個階段。
 
         if err:
             st.error(f"STYLING SERVICE UNAVAILABLE: {err}")
@@ -1457,13 +1456,26 @@ PINNED_IMAGES = {
 def _build_imagen_prompt(item_name: str, gender: str, style: str) -> str:
     g = "men's" if gender not in ("Female", "女性") else "women's"
     clean_item = _strip_brand(item_name)
+    low = clean_item.lower()
+    is_shoe = any(k in low for k in ["鞋", "靴", "sneaker", "loafer", "boot", "shoe",
+                                     "樂福", "帆布", "板鞋", "皮鞋"])
+    if is_shoe:
+        count_rule = ("Show ONE matched pair of shoes only — never more than one pair, "
+                      "no scattered extra shoes. ")
+        view_rule = ("Side profile (lateral) view, both shoes facing the same direction; "
+                     "do NOT use a front-on or top-down view. ")
+    else:
+        count_rule = ("Show EXACTLY ONE single garment — never two, never duplicated or mirrored "
+                      "copies side by side (one pair of trousers counts as ONE item). ")
+        view_rule = "Front-facing view, garment fully flattened and centered. "
     return (
-        f"Professional e-commerce product photograph of ONE single {g} clothing item: {clean_item}. "
-        f"Render the garment EXACTLY as described — match the stated colour, collar type, sleeve "
+        f"Professional e-commerce product photograph of one single {g} clothing item: {clean_item}. "
+        f"{count_rule}"
+        f"Render the item EXACTLY as described — match the stated colour, collar type, sleeve "
         f"length, fit and silhouette precisely. "
-        f"Front-facing view, garment fully flattened and centered. Zoom OUT so the COMPLETE item "
-        f"is fully inside the frame with generous empty margin on all four sides — the item must NOT "
-        f"touch, overflow or be cropped by any edge. "
+        f"{view_rule}"
+        f"Zoom OUT so the COMPLETE item is fully inside the frame with generous empty margin on all "
+        f"four sides — the item must NOT touch, overflow or be cropped by any edge. "
         f"Pure seamless pure-white studio background (#FFFFFF), bright even soft lighting, no harsh "
         f"shadows, no gradient. "
         f"Invisible ghost-mannequin style: NO visible mannequin, NO human, NO body parts, NO face, "
@@ -1535,10 +1547,15 @@ def _composite_prompt(gender: str, mode: str) -> str:
             f"photorealistic fashion-catalog style. Keep each garment faithful to its reference image."
         )
     return (
-        f"Arrange the clothing items shown in the provided images into one stylish {g} flat lay "
-        f"outfit, composed top-to-bottom (top, then bottoms, then shoes), neatly laid flat on a "
-        f"clean white background, soft even lighting, minimalist magazine-catalogue style, "
-        f"photorealistic. Keep each garment faithful to its reference image."
+        f"Create ONE stylish {g} outfit flat lay using the clothing items shown in the provided "
+        f"images, in a polished fashion-magazine editorial style. Arrange the pieces as a balanced, "
+        f"well-composed knolling layout that FILLS the frame: the top garment upper-centre, the "
+        f"bottoms below it, and the shoes placed together as a single pair beside the bottoms. "
+        f"Items may slightly overlap and sit at natural angles for a curated look. "
+        f"Use EACH item exactly once — do NOT duplicate any garment. "
+        f"Clean white background, soft even top-down lighting, subtle realistic shadows, minimal "
+        f"empty margin, photorealistic. Keep every garment faithful to its reference image "
+        f"(same colour, pattern, cut)."
     )
 
 def generate_outfit_composite(image_urls: list[str], gender: str, mode: str = "flatlay") -> bytes | None:
@@ -1782,9 +1799,11 @@ def resolve_item_image(item_name: str, gender: str, category: str = "others",
 _pending = st.session_state.get("_pending_image_gen")
 if _pending:
     st.session_state["_pending_image_gen"] = None
-    with st.spinner("正在生成商品圖..." if lang_select == "繁體中文"
-                    else "Generating product visuals..."):
-        ensure_item_images(_pending["names"], _pending["gender"], _pending["style"])
+    # 不再單獨顯示「正在生成商品圖」轉圈圈 —— 上方那個 30 秒倒數已涵蓋這一段
+    ensure_item_images(_pending["names"], _pending["gender"], _pending["style"])
+    # 文字 + 商品圖都完成 → 清除 30 秒倒數
+    if ui_placeholder is not None:
+        ui_placeholder.empty()
     # 生成後檢查：有缺圖且有錯誤 → 把真實原因浮上 UI（debug 用，穩定後可移除）
     _missing = [n for n in _pending["names"]
                 if n and _img_key_norm(n) not in _IMG_CACHE
