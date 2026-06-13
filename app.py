@@ -1348,11 +1348,15 @@ elif st.button(t["btn"]):
 #   目錄飽和後新生成需求趨近於零。
 # 例外：Padres 球衣是真實特定商品，維持 pinned 圖（不交給生成模型）。
 
-# 模型鏈：Imagen 4 Fast（畫質佳但官方文件標明「無免費層、需開 billing」）
-#         → 失敗自動 fallback 到 Nano Banana（gemini-2.5-flash-image，有免費 API 額度）
+# 模型鏈（畫質優先，2026/06 調整）：
+#   1) Nano Banana 2（gemini-3.1-flash-image-preview）— prompt 遵循度最佳，
+#      能正確還原顏色/領型/袖長，且 100 RPM / 1K RPD，額度遠高於 Imagen。主力。
+#   2) Nano Banana（gemini-2.5-flash-image）— 500 RPM / 2K RPD，最大緩衝，溢流備援。
+#   3) Imagen 4 Fast — 最便宜但遵循度差、10 RPM/70 RPD，僅最後墊底。
 IMAGE_MODEL_CHAIN = [
-    {"name": "imagen-4.0-fast-generate-001", "rpd_soft_limit": 23, "kind": "imagen"},
-    {"name": "gemini-2.5-flash-image",       "rpd_soft_limit": 95, "kind": "nano"},
+    {"name": "gemini-3.1-flash-image-preview", "rpd_soft_limit": 950,  "kind": "nano"},
+    {"name": "gemini-2.5-flash-image",         "rpd_soft_limit": 1900, "kind": "nano"},
+    {"name": "imagen-4.0-fast-generate-001",   "rpd_soft_limit": 65,   "kind": "imagen"},
 ]
 _IMAGE_BILLING_BLOCKED: set = set()   # 確認需要 billing 的模型，本程序生命週期內直接跳過
 _IMAGE_LAST_ERRORS: list = []         # 最近錯誤（浮上 UI 用）
@@ -1452,13 +1456,19 @@ PINNED_IMAGES = {
 
 def _build_imagen_prompt(item_name: str, gender: str, style: str) -> str:
     g = "men's" if gender not in ("Female", "女性") else "women's"
-    style_hint = f", {style} aesthetic" if style and style != "all" else ""
     clean_item = _strip_brand(item_name)
     return (
-        f"Professional e-commerce product photography of a single {g} fashion item: "
-        f"{clean_item}{style_hint}. The garment only, no model, no mannequin, "
-        f"laid flat or hanging, centered, soft studio lighting, "
-        f"clean light beige background, minimalist ZARA catalog style, photorealistic."
+        f"Professional e-commerce product photograph of ONE single {g} clothing item: {clean_item}. "
+        f"Render the garment EXACTLY as described — match the stated colour, collar type, sleeve "
+        f"length, fit and silhouette precisely. "
+        f"Front-facing view, garment fully flattened and centered, the entire item visible inside the "
+        f"frame with a little margin. "
+        f"Pure seamless pure-white studio background (#FFFFFF), bright even soft lighting, no harsh "
+        f"shadows, no gradient. "
+        f"Invisible ghost-mannequin style: NO visible mannequin, NO human, NO body parts, NO face, "
+        f"NO hands, NO hanger, no props, no text, no watermark, no logo. "
+        f"Only the clothing item. Sharp focus, crisp fabric detail, photorealistic, "
+        f"clean ZARA / COS online catalogue style."
     )
 
 
@@ -1509,85 +1519,6 @@ def _call_image_model(model_cfg: dict, api_key: str, prompt: str) -> bytes | Non
             if getattr(part, "inline_data", None) and part.inline_data.data:
                 return part.inline_data.data
     return None
-
-
-# ── Pro 合體穿搭：Nano Banana 2（gemini-3.1-flash-image-preview，多模態）──────
-# 跟商品圖快取（Imagen 4 Fast）分開：這條吃「已有的三張商品圖」當 input，
-# 合成一張 flat lay 或模特圖。共用 IMAGE_API_KEY，計入每日硬上限防爆預算。
-OUTFIT_COMPOSITE_MODEL = "gemini-3.1-flash-image-preview"  # Nano Banana 2
-
-def _composite_prompt(gender: str, mode: str) -> str:
-    g = "men's" if gender not in ("Female", "女性") else "women's"
-    if mode == "model":
-        return (
-            f"Combine the clothing items shown in the provided images into one coordinated {g} "
-            f"outfit, worn together by a single stylized fashion mannequin (not a real, identifiable "
-            f"person), full-body front view, neutral light studio background, soft even lighting, "
-            f"photorealistic fashion-catalog style. Keep each garment faithful to its reference image."
-        )
-    return (
-        f"Arrange the clothing items shown in the provided images into one stylish {g} flat lay "
-        f"outfit, composed top-to-bottom (top, then bottoms, then shoes), neatly laid flat on a "
-        f"clean light beige background, soft even lighting, minimalist magazine-catalog style, "
-        f"photorealistic. Keep each garment faithful to its reference image."
-    )
-
-def generate_outfit_composite(image_urls: list[str], gender: str, mode: str = "flatlay") -> bytes | None:
-    """
-    把目前穿搭的多張商品圖合成一張（mode='flatlay' 平鋪 / 'model' 模特）。
-    回傳合成圖 bytes，失敗回 None（錯誤進 _IMAGE_LAST_ERRORS）。
-    """
-    if not _IMAGEN_AVAILABLE:
-        _record_image_error("composite", "google-genai 未安裝")
-        return None
-    if not IMAGE_API_KEY:
-        _record_image_error("composite", "未設定 GEMINI_API_KEY_IMAGE")
-        return None
-    # 只收真實可抓取的 http 圖（跳過 fallback 的 data: SVG 佔位圖）
-    real_urls = [u for u in image_urls if u and u.startswith("http")]
-    if len(real_urls) < 2:
-        _record_image_error("composite", "可用商品圖不足（需至少 2 張真實商品圖）")
-        return None
-    if not _image_cap_reserve():
-        _record_image_error("composite", f"今日已達生成上限 {IMAGE_DAILY_HARD_CAP} 張（防爆預算）")
-        return None
-    produced = False
-    try:
-        parts = []
-        for u in real_urls:
-            try:
-                r = requests.get(u, timeout=8)
-                if r.ok and r.content:
-                    mime = (r.headers.get("Content-Type", "image/jpeg") or "image/jpeg").split(";")[0]
-                    if not mime.startswith("image/"):
-                        mime = "image/jpeg"
-                    parts.append(genai_types.Part.from_bytes(data=r.content, mime_type=mime))
-            except Exception as e:
-                print(f"[Composite] fetch fail {u}: {e}")
-        if len(parts) < 2:
-            _record_image_error("composite", "商品圖下載失敗（至少需 2 張）")
-            return None
-        parts.append(_composite_prompt(gender, mode))
-        client = genai_new.Client(api_key=IMAGE_API_KEY)
-        resp = client.models.generate_content(
-            model=OUTFIT_COMPOSITE_MODEL,
-            contents=parts,
-            config=genai_types.GenerateContentConfig(response_modalities=["IMAGE"]),
-        )
-        for cand in (resp.candidates or []):
-            for part in (cand.content.parts or []):
-                if getattr(part, "inline_data", None) and part.inline_data.data:
-                    produced = True
-                    print(f"[Composite] generated mode={mode} from {len(parts)-1} items")
-                    return part.inline_data.data
-        _record_image_error("composite", "回應沒有圖片（模特模式較易被安全過濾，可改試 flat lay）")
-        return None
-    except Exception as e:
-        _record_image_error("composite", str(e))
-        return None
-    finally:
-        if not produced:
-            _image_cap_refund()
 
 
 def _generate_item_image(item_name: str, gender: str, style: str = "all") -> str | None:
@@ -2182,51 +2113,18 @@ if st.session_state.last_result:
             st.session_state["pro_paywall_viewed"] = True
             log_event("pro_paywall_view")
 
-        # ── 合體穿搭：實際生成（Nano Banana 2，多模態吃三張商品圖）──
-        _cmp_intro = ("把這套穿搭合成一張圖：" if lang_select == "繁體中文"
-                      else "Combine this outfit into one image:")
-        st.markdown(f"**{_cmp_intro}**")
-        _mode_opts = (["平鋪 Flat lay", "模特展示"] if lang_select == "繁體中文"
-                      else ["Flat lay", "On a model"])
-        _mode_choice = st.radio("composite_mode", _mode_opts, horizontal=True,
-                                key="composite_mode", label_visibility="collapsed")
-        _mode = "model" if _mode_choice in ("模特展示", "On a model") else "flatlay"
-
-        _gen_label = "✨ 生成合體穿搭圖" if lang_select == "繁體中文" else "✨ Generate composite"
-        col_cmp, _ = st.columns([1.5, 2])
-        with col_cmp:
-            if st.button(_gen_label, key="composite_gen_btn", type="primary"):
-                _idxs = st.session_state.get("builder_idx", {"top": 0, "pants": 0, "shoes": 0})
-                _outfit_urls = [st.session_state.get(f"bimg_{_s}_{_idxs.get(_s, 0)}")
-                                for _s in ["top", "pants", "shoes"]]
-                log_event("composite_generate", item_name=_mode)
-                with st.spinner("AI 正在合成穿搭圖…（約 10 秒）" if lang_select == "繁體中文"
-                                else "Composing your outfit… (~10s)"):
-                    _cbytes = generate_outfit_composite(_outfit_urls, user_gender, _mode)
-                st.session_state["_composite_bytes"] = _cbytes
-                if not _cbytes:
-                    _cerr = _IMAGE_LAST_ERRORS[-1] if _IMAGE_LAST_ERRORS else ""
-                    st.warning(
-                        ("合成失敗，請稍後再試，或改用 flat lay 模式。" if lang_select == "繁體中文"
-                         else "Generation failed — try again, or switch to flat lay.")
-                        + (f"\n\n`{_cerr}`" if _cerr else "")
-                    )
-
-        if st.session_state.get("_composite_bytes"):
-            st.image(st.session_state["_composite_bytes"], use_container_width=True)
-            st.download_button(
-                "⬇ 下載圖片" if lang_select == "繁體中文" else "⬇ Download image",
-                data=st.session_state["_composite_bytes"],
-                file_name="outfit_composite.png",
-                mime="image/png",
-                key="composite_dl_btn",
-            )
-
-        st.markdown("---")
-        _unlock_hint = ("喜歡嗎？升級 Pro 解鎖無限生成與高畫質輸出："
-                        if lang_select == "繁體中文"
-                        else "Like it? Upgrade to Pro for unlimited generations & HD output:")
-        st.caption(_unlock_hint)
+        st.markdown(
+            '<div style="font-family:Inter,sans-serif; font-size:0.82rem; '
+            'color:#555; padding:1rem; border:1px solid #eee; margin-top:0.5rem; '
+            'background:#fafafa;">'
+            '🔒 <b>Pro 版功能</b>：一鍵生成完整穿搭 AI 圖像，支援 flat lay 風格與模特展示圖。</div>'
+            if lang_select == "繁體中文" else
+            '<div style="font-family:Inter,sans-serif; font-size:0.82rem; '
+            'color:#555; padding:1rem; border:1px solid #eee; margin-top:0.5rem; '
+            'background:#fafafa;">'
+            '🔒 <b>Pro Feature</b>: Generate a full AI outfit visual — flat lay or model shot — in one click.</div>',
+            unsafe_allow_html=True
+        )
 
         # ── 路徑 A：Stripe Payment Link（funnel step 3a — 真實付費意願）──
         if STRIPE_PAYMENT_LINK:
