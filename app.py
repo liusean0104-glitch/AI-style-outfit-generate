@@ -1511,6 +1511,85 @@ def _call_image_model(model_cfg: dict, api_key: str, prompt: str) -> bytes | Non
     return None
 
 
+# ── Pro 合體穿搭：Nano Banana 2（gemini-3.1-flash-image-preview，多模態）──────
+# 跟商品圖快取（Imagen 4 Fast）分開：這條吃「已有的三張商品圖」當 input，
+# 合成一張 flat lay 或模特圖。共用 IMAGE_API_KEY，計入每日硬上限防爆預算。
+OUTFIT_COMPOSITE_MODEL = "gemini-3.1-flash-image-preview"  # Nano Banana 2
+
+def _composite_prompt(gender: str, mode: str) -> str:
+    g = "men's" if gender not in ("Female", "女性") else "women's"
+    if mode == "model":
+        return (
+            f"Combine the clothing items shown in the provided images into one coordinated {g} "
+            f"outfit, worn together by a single stylized fashion mannequin (not a real, identifiable "
+            f"person), full-body front view, neutral light studio background, soft even lighting, "
+            f"photorealistic fashion-catalog style. Keep each garment faithful to its reference image."
+        )
+    return (
+        f"Arrange the clothing items shown in the provided images into one stylish {g} flat lay "
+        f"outfit, composed top-to-bottom (top, then bottoms, then shoes), neatly laid flat on a "
+        f"clean light beige background, soft even lighting, minimalist magazine-catalog style, "
+        f"photorealistic. Keep each garment faithful to its reference image."
+    )
+
+def generate_outfit_composite(image_urls: list[str], gender: str, mode: str = "flatlay") -> bytes | None:
+    """
+    把目前穿搭的多張商品圖合成一張（mode='flatlay' 平鋪 / 'model' 模特）。
+    回傳合成圖 bytes，失敗回 None（錯誤進 _IMAGE_LAST_ERRORS）。
+    """
+    if not _IMAGEN_AVAILABLE:
+        _record_image_error("composite", "google-genai 未安裝")
+        return None
+    if not IMAGE_API_KEY:
+        _record_image_error("composite", "未設定 GEMINI_API_KEY_IMAGE")
+        return None
+    # 只收真實可抓取的 http 圖（跳過 fallback 的 data: SVG 佔位圖）
+    real_urls = [u for u in image_urls if u and u.startswith("http")]
+    if len(real_urls) < 2:
+        _record_image_error("composite", "可用商品圖不足（需至少 2 張真實商品圖）")
+        return None
+    if not _image_cap_reserve():
+        _record_image_error("composite", f"今日已達生成上限 {IMAGE_DAILY_HARD_CAP} 張（防爆預算）")
+        return None
+    produced = False
+    try:
+        parts = []
+        for u in real_urls:
+            try:
+                r = requests.get(u, timeout=8)
+                if r.ok and r.content:
+                    mime = (r.headers.get("Content-Type", "image/jpeg") or "image/jpeg").split(";")[0]
+                    if not mime.startswith("image/"):
+                        mime = "image/jpeg"
+                    parts.append(genai_types.Part.from_bytes(data=r.content, mime_type=mime))
+            except Exception as e:
+                print(f"[Composite] fetch fail {u}: {e}")
+        if len(parts) < 2:
+            _record_image_error("composite", "商品圖下載失敗（至少需 2 張）")
+            return None
+        parts.append(_composite_prompt(gender, mode))
+        client = genai_new.Client(api_key=IMAGE_API_KEY)
+        resp = client.models.generate_content(
+            model=OUTFIT_COMPOSITE_MODEL,
+            contents=parts,
+            config=genai_types.GenerateContentConfig(response_modalities=["IMAGE"]),
+        )
+        for cand in (resp.candidates or []):
+            for part in (cand.content.parts or []):
+                if getattr(part, "inline_data", None) and part.inline_data.data:
+                    produced = True
+                    print(f"[Composite] generated mode={mode} from {len(parts)-1} items")
+                    return part.inline_data.data
+        _record_image_error("composite", "回應沒有圖片（模特模式較易被安全過濾，可改試 flat lay）")
+        return None
+    except Exception as e:
+        _record_image_error("composite", str(e))
+        return None
+    finally:
+        if not produced:
+            _image_cap_refund()
+
+
 def _generate_item_image(item_name: str, gender: str, style: str = "all") -> str | None:
     """
     同步生成一張商品圖 → Storage → cache 表。回傳 stored_url 或 None。
@@ -2103,18 +2182,51 @@ if st.session_state.last_result:
             st.session_state["pro_paywall_viewed"] = True
             log_event("pro_paywall_view")
 
-        st.markdown(
-            '<div style="font-family:Inter,sans-serif; font-size:0.82rem; '
-            'color:#555; padding:1rem; border:1px solid #eee; margin-top:0.5rem; '
-            'background:#fafafa;">'
-            '🔒 <b>Pro 版功能</b>：一鍵生成完整穿搭 AI 圖像，支援 flat lay 風格與模特展示圖。</div>'
-            if lang_select == "繁體中文" else
-            '<div style="font-family:Inter,sans-serif; font-size:0.82rem; '
-            'color:#555; padding:1rem; border:1px solid #eee; margin-top:0.5rem; '
-            'background:#fafafa;">'
-            '🔒 <b>Pro Feature</b>: Generate a full AI outfit visual — flat lay or model shot — in one click.</div>',
-            unsafe_allow_html=True
-        )
+        # ── 合體穿搭：實際生成（Nano Banana 2，多模態吃三張商品圖）──
+        _cmp_intro = ("把這套穿搭合成一張圖：" if lang_select == "繁體中文"
+                      else "Combine this outfit into one image:")
+        st.markdown(f"**{_cmp_intro}**")
+        _mode_opts = (["平鋪 Flat lay", "模特展示"] if lang_select == "繁體中文"
+                      else ["Flat lay", "On a model"])
+        _mode_choice = st.radio("composite_mode", _mode_opts, horizontal=True,
+                                key="composite_mode", label_visibility="collapsed")
+        _mode = "model" if _mode_choice in ("模特展示", "On a model") else "flatlay"
+
+        _gen_label = "✨ 生成合體穿搭圖" if lang_select == "繁體中文" else "✨ Generate composite"
+        col_cmp, _ = st.columns([1.5, 2])
+        with col_cmp:
+            if st.button(_gen_label, key="composite_gen_btn", type="primary"):
+                _idxs = st.session_state.get("builder_idx", {"top": 0, "pants": 0, "shoes": 0})
+                _outfit_urls = [st.session_state.get(f"bimg_{_s}_{_idxs.get(_s, 0)}")
+                                for _s in ["top", "pants", "shoes"]]
+                log_event("composite_generate", item_name=_mode)
+                with st.spinner("AI 正在合成穿搭圖…（約 10 秒）" if lang_select == "繁體中文"
+                                else "Composing your outfit… (~10s)"):
+                    _cbytes = generate_outfit_composite(_outfit_urls, user_gender, _mode)
+                st.session_state["_composite_bytes"] = _cbytes
+                if not _cbytes:
+                    _cerr = _IMAGE_LAST_ERRORS[-1] if _IMAGE_LAST_ERRORS else ""
+                    st.warning(
+                        ("合成失敗，請稍後再試，或改用 flat lay 模式。" if lang_select == "繁體中文"
+                         else "Generation failed — try again, or switch to flat lay.")
+                        + (f"\n\n`{_cerr}`" if _cerr else "")
+                    )
+
+        if st.session_state.get("_composite_bytes"):
+            st.image(st.session_state["_composite_bytes"], use_container_width=True)
+            st.download_button(
+                "⬇ 下載圖片" if lang_select == "繁體中文" else "⬇ Download image",
+                data=st.session_state["_composite_bytes"],
+                file_name="outfit_composite.png",
+                mime="image/png",
+                key="composite_dl_btn",
+            )
+
+        st.markdown("---")
+        _unlock_hint = ("喜歡嗎？升級 Pro 解鎖無限生成與高畫質輸出："
+                        if lang_select == "繁體中文"
+                        else "Like it? Upgrade to Pro for unlimited generations & HD output:")
+        st.caption(_unlock_hint)
 
         # ── 路徑 A：Stripe Payment Link（funnel step 3a — 真實付費意願）──
         if STRIPE_PAYMENT_LINK:
