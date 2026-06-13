@@ -12,23 +12,47 @@ import asyncio
 import time
 
 def _countdown_html(total_secs: int, lang: str) -> str:
-    """瀏覽器端平滑倒數（setInterval，每秒 -1，不會跳秒）。涵蓋文字+圖片兩階段。"""
+    """瀏覽器端平滑倒數：時尚襯線字 + 隨秒數消減的細圓環。涵蓋文字+圖片兩階段。"""
     if lang == "繁體中文":
-        title = "Curating Your Style"
-        tips = ["正在分析您的身形比例…", "正在挑選季度單品…", "正在優化剪裁平衡…",
-                "正在注入簡約美學…", "您的專屬提案即將呈現…"]
-        final_txt = "即將完成…"
+        tips = ["正在分析您的身形比例", "正在挑選季度單品", "正在優化剪裁平衡",
+                "正在注入簡約美學", "您的專屬提案即將呈現"]
+        final_txt = "即將完成"
     else:
-        title = "Curating Your Style"
-        tips = ["Analyzing your body proportions...", "Selecting seasonal pieces...",
-                "Balancing garment cut...", "Injecting minimalist aesthetics...",
-                "Your curated style is almost ready..."]
-        final_txt = "Almost ready..."
+        tips = ["Analyzing your proportions", "Selecting seasonal pieces",
+                "Balancing the silhouette", "Injecting minimalist aesthetics",
+                "Your curated style is almost ready"]
+        final_txt = "Almost ready"
+    circ = round(2 * 3.14159 * 54, 2)   # 半徑 54 的圓周長
     return f"""
-    <div style="font-family:'Inter',sans-serif;text-align:center;padding:1.8rem 1rem;">
-      <div style="font-size:0.95rem;letter-spacing:4px;text-transform:uppercase;color:#111;font-weight:600;">{title}</div>
-      <div id="cdtip" style="font-size:0.8rem;color:#999;margin-top:1.1rem;min-height:1.2em;">{tips[0]}</div>
-      <div id="cdnum" style="font-size:0.72rem;letter-spacing:3px;color:#000;margin-top:1.1rem;font-weight:600;">{total_secs}s</div>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Bodoni+Moda:ital,wght@0,400;0,500;1,400&family=Inter:wght@200;300;400&display=swap');
+      .cd-wrap {{ font-family:'Inter',sans-serif; text-align:center; padding:1.4rem 1rem; }}
+      .cd-title {{ font-family:'Bodoni Moda',serif; font-weight:400; font-size:1.3rem;
+                  letter-spacing:8px; text-transform:uppercase; color:#1a1a1a; }}
+      .cd-ring {{ position:relative; width:124px; height:124px; margin:1.2rem auto 0.7rem; }}
+      .cd-ring svg {{ transform:rotate(-90deg); }}
+      .cd-bg {{ fill:none; stroke:#ededed; stroke-width:1.5; }}
+      .cd-fg {{ fill:none; stroke:#1a1a1a; stroke-width:1.5; stroke-linecap:round;
+               stroke-dasharray:{circ}; stroke-dashoffset:0;
+               animation:cdDeplete {total_secs}s linear forwards; }}
+      @keyframes cdDeplete {{ to {{ stroke-dashoffset:{circ}; }} }}
+      .cd-num {{ position:absolute; top:0; left:0; width:100%; height:100%;
+                display:flex; align-items:center; justify-content:center;
+                font-family:'Bodoni Moda',serif; font-weight:400; font-size:1.7rem; color:#1a1a1a; }}
+      .cd-tip {{ font-family:'Inter',sans-serif; font-weight:300; font-style:italic;
+                font-size:0.82rem; color:#b0b0b0; letter-spacing:1px; min-height:1.2em;
+                transition:opacity .5s ease; }}
+    </style>
+    <div class="cd-wrap">
+      <div class="cd-title">Curating Your Style</div>
+      <div class="cd-ring">
+        <svg width="124" height="124" viewBox="0 0 124 124">
+          <circle class="cd-bg" cx="62" cy="62" r="54"></circle>
+          <circle class="cd-fg" cx="62" cy="62" r="54"></circle>
+        </svg>
+        <div class="cd-num" id="cdnum">{total_secs}</div>
+      </div>
+      <div class="cd-tip" id="cdtip">{tips[0]}</div>
     </div>
     <script>
       var t = {total_secs};
@@ -39,10 +63,15 @@ def _countdown_html(total_secs: int, lang: str) -> str:
       var tipEl = document.getElementById('cdtip');
       var iv = setInterval(function() {{
         t -= 1;
-        if (t > 0) {{ numEl.textContent = t + 's'; }}
+        if (t > 0) {{ numEl.textContent = t; }}
         else {{ numEl.textContent = ''; tipEl.textContent = finalTxt; clearInterval(iv); }}
       }}, 1000);
-      setInterval(function() {{ ti = (ti + 1) % tips.length; tipEl.textContent = tips[ti]; }}, 2600);
+      setInterval(function() {{
+        tipEl.style.opacity = 0;
+        setTimeout(function() {{
+          ti = (ti + 1) % tips.length; tipEl.textContent = tips[ti]; tipEl.style.opacity = 1;
+        }}, 400);
+      }}, 2800);
     </script>
     """
 
@@ -344,10 +373,10 @@ st.markdown("""
         border-radius: 0px !important;
     }
 
-    /* Image container — show COMPLETE item, never crop (contain) */
+    /* Image container — square to match the generated image, fills frame, never crops */
     .img-container {
         width: 100%;
-        aspect-ratio: 3/4;
+        aspect-ratio: 1/1;
         overflow: hidden;
         border: 1px solid #f0f0f0;
         background-color: #ffffff;
@@ -1255,7 +1284,7 @@ elif st.button(t["btn"]):
         # 單一平滑倒數（瀏覽器端 JS，每秒 -1 不跳秒）：涵蓋「文字生成 + 商品圖生成」共 30 秒
         ui_placeholder = st.empty()
         with ui_placeholder.container():
-            components.html(_countdown_html(30, lang_select), height=190)
+            components.html(_countdown_html(30, lang_select), height=290)
 
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -1474,8 +1503,9 @@ def _build_imagen_prompt(item_name: str, gender: str, style: str) -> str:
         f"Render the item EXACTLY as described — match the stated colour, collar type, sleeve "
         f"length, fit and silhouette precisely. "
         f"{view_rule}"
-        f"Zoom OUT so the COMPLETE item is fully inside the frame with generous empty margin on all "
-        f"four sides — the item must NOT touch, overflow or be cropped by any edge. "
+        f"The item should FILL most of the frame — occupy roughly 88% of the canvas, centered, with "
+        f"only a small even margin. Do NOT leave large empty space and do NOT make the item small, "
+        f"but it must not touch or be cropped by any edge. "
         f"Pure seamless pure-white studio background (#FFFFFF), bright even soft lighting, no harsh "
         f"shadows, no gradient. "
         f"Invisible ghost-mannequin style: NO visible mannequin, NO human, NO body parts, NO face, "
@@ -1550,12 +1580,15 @@ def _composite_prompt(gender: str, mode: str) -> str:
         f"Create ONE stylish {g} outfit flat lay using the clothing items shown in the provided "
         f"images, in a polished fashion-magazine editorial style. Arrange the pieces as a balanced, "
         f"well-composed knolling layout that FILLS the frame: the top garment upper-centre, the "
-        f"bottoms below it, and the shoes placed together as a single pair beside the bottoms. "
-        f"Items may slightly overlap and sit at natural angles for a curated look. "
+        f"bottoms below it shown FULL-LENGTH, and the shoes placed together as a single pair beside "
+        f"the bottoms. "
+        f"Show EACH garment at its TRUE natural proportions and full length — do NOT fold, bunch up, "
+        f"shorten, crop, roll or distort any item to make it fit; trousers must lie flat and fully "
+        f"extended from waist to hem, never folded or cut off. Keep overlaps minimal so every piece "
+        f"is fully visible. "
         f"Use EACH item exactly once — do NOT duplicate any garment. "
-        f"Clean white background, soft even top-down lighting, subtle realistic shadows, minimal "
-        f"empty margin, photorealistic. Keep every garment faithful to its reference image "
-        f"(same colour, pattern, cut)."
+        f"Clean white background, soft even top-down lighting, subtle realistic shadows, "
+        f"photorealistic. Keep every garment faithful to its reference image (same colour, pattern, cut)."
     )
 
 def generate_outfit_composite(image_urls: list[str], gender: str, mode: str = "flatlay") -> bytes | None:
